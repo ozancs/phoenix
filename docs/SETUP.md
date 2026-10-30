@@ -1,7 +1,7 @@
 # Setup guide (0.2)
 
-There are two parts: host installation and a printer-side review. Neither moves or
-heats the printer. The installer changes configuration only after displaying its
+There are two parts: host installation and a printer-side review. Opening either part does not move or heat the printer. The runtime guide offers
+explicit empty-bed homing and XY jog actions before saving the selected park point. The installer changes configuration only after displaying its
 plan and obtaining a terminal confirmation (or explicit --yes).
 
 ## Host installation
@@ -43,7 +43,7 @@ benefit if they call the modified macros.
 
 `PHOENIX_SETUP_GUIDE` is a visible macro opening `PHOENIX_SETUP`.
 The standard action:prompt UI works independently of Voyager. Console-only clients
-can run `PHOENIX_SETUP PROMPT=0` for the same structured report.
+can run `PHOENIX_SETUP PROMPT=0` for a short human-readable summary. Add DETAILS=1 only for a diagnostic JSON report.
 
 1. Module loaded.
 2. Compatible configuration (unsupported kinematics/transforms are reported).
@@ -81,3 +81,21 @@ physical route and does not resolve Z-hop uncertainty.
 `setup.complete` means configuration/review are ready, not that a hardware test has
 passed. The test step remains manual. Discarding a failed print does not erase the
 reviewed setup profile.
+
+## Simpler interaction in 0.3
+
+If setup is already complete, show the saved point, Change park point and Finish.
+When editing an unhomed printer, offer the home step before jog/save controls.
+`_PHOENIX_SETUP_HOME BED_CLEAR=1 CONFIRM=1` invokes the user's normal G28 routine
+only while idle with no recovery. It may include user-defined homing behavior;
+it is an explicit setup action on an empty bed, not a recovery action.
+
+Once homed, 1/10 mm XY jog buttons move within limits and lift to at least the
+configured clearance above Z minimum first. `_PHOENIX_SETUP_JOG AXIS=X DISTANCE=1
+CONFIRM=1` is an internal button command. **Save park and finish** persists the point,
+prints one short confirmation and closes the prompt. Standard macro prompts do not
+provide portable number-input fields; native Voyager can provide those fields using
+SETUP_PROFILE. The fallback supplies jog buttons instead.
+
+No normal setup action dumps JSON. Live object status supplies frontend data.
+PHOENIX_STATUS is short by default; DETAILS=1 is the explicit diagnostic option.

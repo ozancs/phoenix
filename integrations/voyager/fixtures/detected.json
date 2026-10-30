@@ -1,6 +1,6 @@
 {
   "api_version": 1,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "phase": "detected",
   "revision": 1,
   "busy": false,
@@ -123,6 +123,21 @@
         "state": "manual",
         "message": "Verify recording on a small supervised test print"
       }
+    ],
+    "homed_axes": "",
+    "can_edit": false,
+    "can_jog": false,
+    "can_use_current": false,
+    "current_position": [
+      0,
+      0,
+      0
     ]
+  },
+  "demo": {
+    "phase": "off",
+    "homed_axes": "",
+    "heaters_off": true,
+    "can_start": false
   }
 }

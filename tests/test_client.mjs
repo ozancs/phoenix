@@ -48,6 +48,8 @@ test('setup profile requires explicit idle confirmation and finite coordinates',
   for (const x of [NaN, Infinity, '10\nG28']) assert.throws(() => setupProfileCommand(status, { ...options, x }));
   assert.throws(() => setupProfileCommand({ ...status, phase: 'detected' }, options));
   assert.throws(() => setupProfileCommand(status, { ...options, confirmed: false }));
+  assert.throws(() => setupProfileCommand({ ...status, setup: { can_edit: false } }, options));
+  assert.throws(() => setupProfileCommand({ ...status, setup: { can_use_current: false } }, { ...options, useCurrent: true }));
   assert.equal(setupProfileCommand(status, { ...options, useCurrent: true }),
     'PHOENIX_SETUP_PROFILE USE_CURRENT=1 CLEARANCE=5 CONFIRM=1');
 });

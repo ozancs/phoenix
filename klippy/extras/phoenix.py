@@ -13,9 +13,9 @@ import time
 import uuid
 
 from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, digest, file_identity,
-                           recovery_plan, verify_file)
+                           demo_plan, recovery_plan, verify_file)
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
@@ -61,12 +61,19 @@ class Phoenix:
         self.layer_z = None
         self.revision = 0
         self.busy = False
+        self.demo = {"phase": "off"}
         self.journal = self.writer = None
         for name in ("START", "END", "STATUS", "SELECT", "CHECK", "PREPARE",
                      "RESUME", "DISCARD", "PROMPT", "LAYER", "SETUP",
-                     "SETUP_PROFILE", "SETUP_SLICER"):
+                     "SETUP_PROFILE", "SETUP_SLICER", "DEMO"):
             self.gcode.register_command("PHOENIX_" + name, getattr(self, "cmd_" + name),
-                                        desc="Phoenix " + name.lower())
+                                        desc={"SETUP": "Set up Phoenix or change the park point",
+                                              "STATUS": "Show Phoenix recording and recovery status",
+                                              "DEMO": "Try recovery on an empty bed, without heating or extrusion",
+                                              "START": "Automatic print-start hook; not a manual action",
+                                              "END": "Automatic print-end hook; not a manual action"}.get(name))
+        for name in ("SETUP_HOME", "SETUP_JOG", "DEMO_START", "DEMO_CHECK", "DEMO_RECOVER", "DEMO_EXIT"):
+            self.gcode.register_command("_PHOENIX_" + name, getattr(self, "cmd_" + name))
         self.printer.register_event_handler("klippy:ready", self._ready)
         self.printer.register_event_handler("klippy:shutdown", self._shutdown)
         self.printer.register_event_handler("stepper_enable:motor_off", self._motor_off)
@@ -107,10 +114,14 @@ class Phoenix:
         self.active = False
 
     def _motor_off(self, *args):
+        if self.demo["phase"] not in ("off", "ready", "complete"):
+            self.demo.update(phase="blocked", error="Motors were disabled. Exit the demo and home again.")
         if self.phase in ("preparing", "prepared", "heating", "returning"):
             self._block("Motors were disabled during recovery; position is no longer trusted.")
 
     def _homing_begin(self, homing_state, rails):
+        if self.demo["phase"] not in ("off", "ready", "complete"):
+            self.demo.update(phase="blocked", error="Homing changed the demo position. Exit and start again.")
         if self.phase in ("preparing", "prepared", "heating", "returning") and 2 in homing_state.get_axes():
             self._block("Z homing is not allowed during Phoenix recovery.")
             raise self.gcode.error(self.error)
@@ -125,11 +136,8 @@ class Phoenix:
 
     def _event(self, event):
         self.revision += 1
-        self.gcode.respond_raw("// phoenix:event " + json.dumps({
-            "api_version": 1, "event": event, "phase": self.phase,
-            "job_id": self.job.get("id") if self.job else None,
-            "revision": self.revision,
-        }, separators=(",", ":")))
+        # Moonraker object subscriptions carry state/revision. Console is for people.
+        logging.debug("Phoenix event=%s phase=%s revision=%s", event, self.phase, self.revision)
 
     def _settings(self):
         return self.configfile.get_status(self.reactor.monotonic())["settings"]
@@ -189,10 +197,18 @@ class Phoenix:
                     if re.search(r"^\s*" + command + r"(?:\s|$)", options.get("gcode", ""), re.M):
                         hooks[kind].append(name[12:])
         connected = all(hooks.values()) or self.slicer_confirmed
+        homed = self.toolhead.get_status(self.reactor.monotonic()).get("homed_axes", "")
+        editable = (self.phase == "idle" and not self.busy and not self.vsd.is_active()
+                    and self.demo["phase"] == "off"
+                    and self._status("print_stats").get("state") not in ("printing", "paused"))
         return {"complete": self.profile_ready and connected and not self.profile_error and not compatible_error,
                 "profile_ready": self.profile_ready, "profile_error": self.profile_error,
                 "park": list(self.park), "clearance": self.clearance,
                 "hooks": hooks, "slicer_confirmed": self.slicer_confirmed,
+                "homed_axes": homed, "can_edit": editable,
+                "can_use_current": editable and all(axis in homed for axis in "xy"),
+                "can_jog": editable and all(axis in homed for axis in "xyz"),
+                "current_position": list(self.toolhead.get_position())[:3],
                 "steps": [
                     {"id": "module", "state": "ok", "message": "Phoenix module loaded"},
                     {"id": "printer", "state": "blocked" if compatible_error else "ok",
@@ -201,32 +217,253 @@ class Phoenix:
                      "message": "Print hooks found/confirmed" if connected else
                      "Rerun setup to connect macros, or add PHOENIX_START/PHOENIX_END in your slicer"},
                     {"id": "park", "state": "ok" if self.profile_ready else "needs_action",
-                     "message": self.profile_error or "Review a clear park point and route with an empty bed"},
+                     "message": self.profile_error or ("Park point saved" if self.profile_ready else
+                     "Choose a clear park point on an empty bed")},
                     {"id": "test", "state": "manual", "message": "Verify recording on a small supervised test print"}]}
 
     def cmd_SETUP(self, gcmd):
         status = self._setup_status()
-        gcmd.respond_info(json.dumps(status, indent=2))
+        if gcmd.get_int("DETAILS", 0):
+            gcmd.respond_info(json.dumps(status, indent=2))
         if not gcmd.get_int("PROMPT", 1):
+            if not gcmd.get_int("DETAILS", 0):
+                gcmd.respond_info("Phoenix setup is ready." if status["complete"] else
+                                  "Phoenix setup is not finished. Open PHOENIX_SETUP_GUIDE.")
             return
         send = lambda line: self.gcode.respond_raw("// action:prompt_" + line)
         send("begin Phoenix setup")
-        for step in status["steps"]:
-            send("text [%s] %s" % (step["state"], step["message"]))
-        send("text This guide never homes, heats or moves the printer. No Z homing for recovery.")
-        send("text Empty the bed; use normal controls to position XY at a clear park point. Review the lift and return path.")
-        send("text For typed coordinates: PHOENIX_SETUP_PROFILE X=10 Y=10 CLEARANCE=5 CONFIRM=1 (use your own values).")
-        send("text Current park: X=%.3f Y=%.3f; clearance %.3f mm" % (self.park[0], self.park[1], self.clearance))
-        if self.phase == "idle" and not self.vsd.is_active():
-            send("button Use current XY; I reviewed the route|PHOENIX_SETUP_PROFILE USE_CURRENT=1 CONFIRM=1 REFRESH=1|primary")
-            if not all(status["hooks"].values()) and not self.slicer_confirmed:
-                send("text No automatic slicer access: add START after initialization and END before parking/heaters off. Reslice existing files.")
-                send("button I added both slicer commands|PHOENIX_SETUP_SLICER CONFIRM=1 REFRESH=1|secondary")
+        if not status["can_edit"]:
+            send("text Finish the current print or close the interrupted-print recovery before changing setup.")
+        elif any(step["state"] == "blocked" for step in status["steps"]):
+            for step in status["steps"]:
+                if step["state"] == "blocked":
+                    send("text " + step["message"])
+        elif not all(status["hooks"].values()) and not self.slicer_confirmed:
+            send("text Connect Phoenix to your prints. Run the installer again to add the print hooks.")
+            send("text If you use slicer-only code: add PHOENIX_START after initialization and PHOENIX_END before end/park actions, then reslice.")
+            send("button I added both slicer commands|PHOENIX_SETUP_SLICER CONFIRM=1 REFRESH=1|primary")
+        elif self.profile_ready and not gcmd.get_int("EDIT", 0):
+            send("text Setup complete. Phoenix records automatically during your normal prints.")
+            send("text Saved park: X=%.1f Y=%.1f. Clearance: %.1f mm." % (self.park[0], self.park[1], self.clearance))
+            send("button Change park point|PHOENIX_SETUP EDIT=1|secondary")
+            send("footer_button Finish|PHOENIX_CLOSE_PROMPT|primary")
+            send("show")
+            return
+        elif not status["can_jog"]:
+            send("text First, home the printer so its position is known. Remove all prints from the bed.")
+            send("text This setup-only action runs your normal homing routine; all axes may move. Recovery never homes Z.")
+            send("button Bed is empty - home printer|_PHOENIX_SETUP_HOME BED_CLEAR=1 CONFIRM=1|primary")
+            send("button I homed using printer controls - continue|PHOENIX_SETUP EDIT=1|secondary")
         else:
-            send("text Setup edits are disabled while a print or recovery exists.")
-        send("footer_button Recheck|PHOENIX_SETUP|primary")
+            send("text Choose the park position. Keep the bed empty and the travel path clear.")
+            current = status["current_position"]
+            send("text Current X=%.1f Y=%.1f. Jog buttons first lift to at least %.1f mm above Z minimum." % (current[0], current[1], self.clearance))
+            for distance in (1, 10):
+                send("button_group_start")
+                limits = self.toolhead.get_status(self.reactor.monotonic())
+                for axis, sign in (("X", -1), ("X", 1), ("Y", -1), ("Y", 1)):
+                    index = "XY".index(axis)
+                    if limits["axis_minimum"][index] <= current[index] + sign * distance <= limits["axis_maximum"][index]:
+                        send("button %s%+d mm|_PHOENIX_SETUP_JOG AXIS=%s DISTANCE=%d CONFIRM=1|secondary" %
+                             (axis, sign * distance, axis, sign * distance))
+                send("button_group_end")
+            send("text Save only after checking that this park point and its approach will be clear during recovery.")
+            send("footer_button Save park and finish|PHOENIX_SETUP_PROFILE USE_CURRENT=1 CONFIRM=1 FINISH=1|primary")
         send("footer_button Close|PHOENIX_CLOSE_PROMPT|secondary")
         send("show")
+
+    def cmd_SETUP_HOME(self, gcmd):
+        self._setup_edit_allowed(gcmd)
+        if gcmd.get_int("BED_CLEAR", 0) != 1:
+            raise gcmd.error("Remove prints from the bed before homing for setup.")
+        self.busy = True
+        try:
+            self.gcode.run_script_from_command("G28")
+            self.toolhead.wait_moves()
+        finally:
+            self.busy = False
+        # Re-open park selection, including when changing an already saved point.
+        followup = self.gcode.create_gcode_command("PHOENIX_SETUP", "PHOENIX_SETUP EDIT=1", {"EDIT": "1"})
+        self.cmd_SETUP(followup)
+
+    def cmd_SETUP_JOG(self, gcmd):
+        self._setup_edit_allowed(gcmd)
+        if not self._setup_status()["can_jog"]:
+            raise gcmd.error("Home the printer on an empty bed before choosing a park point.")
+        axis = gcmd.get("AXIS", "").upper()
+        distance = gcmd.get_float("DISTANCE")
+        if axis not in ("X", "Y") or not math.isfinite(distance) or not 0 < abs(distance) <= 10:
+            raise gcmd.error("Choose an X or Y jog between 0 and 10 mm.")
+        self.toolhead.wait_moves()
+        limits = self.toolhead.get_status(self.reactor.monotonic())
+        lift = list(self.toolhead.get_position())[:3]
+        lift[2] = max(lift[2], limits["axis_minimum"][2] + self.clearance)
+        target = list(lift)
+        target["XY".index(axis)] += distance
+        for index, value in enumerate(target):
+            if not limits["axis_minimum"][index] <= value <= limits["axis_maximum"][index]:
+                raise gcmd.error("That move would exceed the printer's travel limits.")
+        self.busy = True
+        try:
+            self._move_machine(lift, self.z_speed)
+            self._move_machine(target, min(self.travel_speed, 20.))
+        finally:
+            self.busy = False
+        followup = self.gcode.create_gcode_command("PHOENIX_SETUP", "PHOENIX_SETUP EDIT=1", {"EDIT": "1"})
+        self.cmd_SETUP(followup)
+
+    def _demo_heaters_off(self):
+        if any(self._status(name).get("target", 0) > 0 for name in ("extruder", "heater_bed")):
+            return False
+        return not any(heater.get_status(self.reactor.monotonic()).get("target", 0) > 0
+                       for _, heater in self.printer.lookup_objects("heater_generic"))
+
+    def _demo_guard(self, gcmd, homed=False, cold=True):
+        if self.busy:
+            raise gcmd.error("Wait for the current demo movement to finish. Emergency stop remains available.")
+        if self.phase != "idle" or self.vsd.is_active() or self._status("print_stats").get("state") in ("printing", "paused"):
+            raise gcmd.error("Demo requires an idle printer with no interrupted print waiting for recovery.")
+        try:
+            self._compatible()
+        except ValueError as exc:
+            raise gcmd.error(str(exc))
+        if homed and not all(axis in self.toolhead.get_status(self.reactor.monotonic())["homed_axes"] for axis in "xyz"):
+            raise gcmd.error("Home the printer using its normal controls, then reopen PHOENIX_DEMO.")
+        if cold and not self._demo_heaters_off():
+            raise gcmd.error("Turn off all heater targets before starting the demo.")
+
+    def cmd_DEMO(self, gcmd):
+        self._demo_guard(gcmd, cold=False)
+        if self.demo["phase"] == "off":
+            self.demo = {"phase": "ready", "checks": {"position_ok": False, "path_clear": False}, "error": None}
+        send = lambda line: self.gcode.respond_raw("// action:prompt_" + line)
+        send("begin Phoenix demo - no real print")
+        stage = self.demo["phase"]
+        if stage == "ready":
+            send("text Remove all prints from the bed. This demo moves XYZ but never heats, extrudes or resumes a file.")
+            homed = self.toolhead.get_status(self.reactor.monotonic())["homed_axes"]
+            if not self._demo_heaters_off():
+                send("text Turn off heater targets using the printer controls. The demo never changes your heater settings.")
+                send("button Heater targets are off - recheck|PHOENIX_DEMO|primary")
+            elif not all(axis in homed for axis in "xyz"):
+                send("text First home with the printer's normal controls, then turn any heater targets off and recheck here.")
+                send("text Demo does not run your homing macros because they may enable heaters.")
+                send("button I homed the printer - recheck|PHOENIX_DEMO|primary")
+            else:
+                limits = self.toolhead.get_status(self.reactor.monotonic())
+                plan = demo_plan(self.toolhead.get_position(), (limits["axis_minimum"], limits["axis_maximum"]), self.clearance)
+                send("text Example interruption point: X=%.1f Y=%.1f Z=%.1f" % tuple(plan["origin"]))
+                send("button Bed and travel path are empty - start demo|_PHOENIX_DEMO_START BED_CLEAR=1 CONFIRM=1|primary")
+        elif stage == "interrupted":
+            send("text Pretend power was lost here. The actual printer is still powered and its position is known.")
+            send("text Saved demo point: X=%.1f Y=%.1f Z=%.1f" % tuple(self.demo["plan"]["origin"]))
+            for key, label in (("position_ok", "The nozzle is at the shown point; nothing moved"),
+                               ("path_clear", "The bed and parking/return path are clear")):
+                checked = self.demo["checks"][key]
+                send("button %s%s|_PHOENIX_DEMO_CHECK ITEM=%s VALUE=%d|%s" %
+                     ("[OK] " if checked else "[ ] ", label, key, not checked, "success" if checked else "secondary"))
+            if all(self.demo["checks"].values()):
+                send("footer_button Simulate recovery|_PHOENIX_DEMO_RECOVER CONFIRM=1|primary")
+        elif stage == "complete":
+            send("text Demo complete. Returned to the same XYZ point. No heat, extrusion or file resume was performed.")
+        elif stage == "blocked":
+            send("text " + self.demo.get("error", "Exit the demo and check the printer."))
+        send("footer_button Finish demo|_PHOENIX_DEMO_EXIT|secondary")
+        send("show")
+
+    def cmd_DEMO_START(self, gcmd):
+        self._demo_guard(gcmd, homed=True)
+        if self.demo["phase"] != "ready":
+            raise gcmd.error("Open PHOENIX_DEMO to start a new demonstration.")
+        if gcmd.get_int("BED_CLEAR", 0) != 1 or gcmd.get_int("CONFIRM", 0) != 1:
+            raise gcmd.error("Confirm the bed and travel path are empty before starting the demo.")
+        self.toolhead.wait_moves()
+        limits = self.toolhead.get_status(self.reactor.monotonic())
+        plan = demo_plan(self.toolhead.get_position(), (limits["axis_minimum"], limits["axis_maximum"]), self.clearance)
+        self.demo.update(phase="positioning", plan=plan)
+        self.busy = True
+        try:
+            self._demo_move(plan["initial_lift"], self.z_speed)
+            self._demo_move(plan["initial_above"], min(self.travel_speed, 30.))
+            self._demo_move(plan["origin"], self.z_speed)
+            self.demo["phase"] = "interrupted"
+        except Exception as exc:
+            self.demo.update(phase="blocked", error=str(exc))
+            raise gcmd.error(str(exc))
+        finally:
+            self.busy = False
+        self.cmd_DEMO(gcmd)
+
+    def _demo_move(self, position, speed):
+        if self.demo["phase"] == "blocked":
+            raise ValueError(self.demo["error"])
+        self._move_machine(position, speed)
+        if self.demo["phase"] == "blocked":
+            raise ValueError(self.demo["error"])
+
+    def cmd_DEMO_CHECK(self, gcmd):
+        self._demo_guard(gcmd, homed=True)
+        if self.demo["phase"] != "interrupted":
+            raise gcmd.error("Start the demo before confirming its recovery checks.")
+        item = gcmd.get("ITEM", "")
+        if item not in self.demo["checks"]:
+            raise gcmd.error("Choose a check from the demo screen.")
+        self.demo["checks"][item] = bool(gcmd.get_int("VALUE", minval=0, maxval=1))
+        self.cmd_DEMO(gcmd)
+
+    def cmd_DEMO_RECOVER(self, gcmd):
+        self._demo_guard(gcmd, homed=True)
+        if self.demo["phase"] != "interrupted" or not all(self.demo["checks"].values()) or gcmd.get_int("CONFIRM", 0) != 1:
+            raise gcmd.error("Complete the demo checks before simulating recovery.")
+        plan = self.demo["plan"]
+        if any(abs(self.toolhead.get_position()[i] - plan["origin"][i]) > .01 for i in range(3)):
+            raise gcmd.error("The demo position changed. Exit the demo and start again.")
+        fan = self.printer.lookup_object("fan", None)
+        driver = getattr(fan, "fan", None)
+        previous_fan = self._status("fan").get("speed", 0.)
+        fan_changed = False
+        self.busy = True
+        try:
+            self.demo["phase"] = "parking"
+            self._demo_move(plan["lift"], self.z_speed)
+            self._demo_move(plan["park"], min(self.travel_speed, 30.))
+            self.demo["phase"] = "simulating_heat"
+            gcmd.respond_info("Demo: pretending to heat. Heaters stay off; the part fan will signal readiness.")
+            self.toolhead.dwell(1.)
+            self.toolhead.wait_moves()
+            if driver and hasattr(driver, "set_speed_from_command"):
+                for _ in range(3):
+                    for value in (1., 0.):
+                        fan_changed = True
+                        driver.set_speed_from_command(value)
+                        self.toolhead.dwell(.4)
+                        self.toolhead.wait_moves()
+                driver.set_speed_from_command(previous_fan)
+                self.toolhead.wait_moves()
+                fan_changed = False
+            else:
+                gcmd.respond_info("Demo warm-up complete. No standard part fan is configured for the signal.")
+            self.demo["phase"] = "returning" if self.demo["phase"] != "blocked" else "blocked"
+            self._demo_move(plan["above_origin"], min(self.travel_speed, 30.))
+            self._demo_move(plan["origin"], self.z_speed)
+            self.demo["phase"] = "complete"
+        except Exception as exc:
+            self.demo.update(phase="blocked", error=str(exc))
+            raise gcmd.error(str(exc))
+        finally:
+            if fan_changed:
+                try:
+                    driver.set_speed_from_command(previous_fan)
+                except Exception:
+                    logging.exception("Phoenix demo fan restore failed")
+            self.busy = False
+        self.cmd_DEMO(gcmd)
+
+    def cmd_DEMO_EXIT(self, gcmd):
+        if self.busy:
+            raise gcmd.error("Wait for this demo step to finish, or use the printer emergency stop.")
+        self.demo = {"phase": "off"}
+        self.gcode.respond_raw("// action:prompt_end")
 
     def _setup_edit_allowed(self, gcmd):
         self._require(gcmd, ("idle",))
@@ -255,8 +492,10 @@ class Phoenix:
             self.park, self.clearance, self.profile_ready, self.profile_error = old
             raise gcmd.error(str(exc))
         self._event("setup_changed")
-        gcmd.respond_info("Phoenix park profile saved. No restart or SAVE_CONFIG needed; nothing moved.")
-        if gcmd.get_int("REFRESH", 0):
+        gcmd.respond_info("Park position saved. Phoenix will record automatically during your prints.")
+        if gcmd.get_int("FINISH", 0):
+            self.gcode.respond_raw("// action:prompt_end")
+        elif gcmd.get_int("REFRESH", 0):
             self.cmd_SETUP(gcmd)
 
     def cmd_SETUP_SLICER(self, gcmd):
@@ -373,8 +612,24 @@ class Phoenix:
         self._event(phase)
 
     def _require(self, gcmd, phases):
-        if self.busy or self.phase not in phases:
-            raise gcmd.error("Phoenix action is unavailable in phase " + self.phase)
+        if self.demo["phase"] != "off":
+            raise gcmd.error("Finish the Phoenix demo before using setup, recovery or starting a print.")
+        if self.busy:
+            raise gcmd.error("Phoenix is still working. Wait for the current step to finish.")
+        if self.phase not in phases:
+            if self.phase == "idle":
+                message = "There is no interrupted print to recover. Phoenix records automatically when you print."
+            elif self.phase == "recording":
+                message = "A print is already being recorded. Recovery controls are only for interrupted prints."
+            elif self.phase == "blocked":
+                message = "Recovery needs attention. " + (self.error or "Open PHOENIX_RECOVERY for details.")
+            elif phases == ("prepared",):
+                message = "Open PHOENIX_RECOVERY and finish the checks and parking step before resuming."
+            elif phases == ("idle",):
+                message = "Finish or discard the interrupted-print recovery before changing setup or starting another print."
+            else:
+                message = "This step is not available now. Open PHOENIX_RECOVERY to see the next action."
+            raise gcmd.error(message)
         if not self.writer:
             raise gcmd.error(self.error or "Phoenix is not ready")
 
@@ -440,6 +695,13 @@ class Phoenix:
                     "gcode_position": p["gcode_position"][:3], "layer_z": p["layer_z"],
                     "z_above_layer": p["z_above_layer"]}
                    for index, p in enumerate(reversed(points))]
+        demo = copy.deepcopy(self.demo)
+        demo["homed_axes"] = self.toolhead.get_status(eventtime).get("homed_axes", "")
+        demo["heaters_off"] = self._demo_heaters_off()
+        demo["can_start"] = (demo["phase"] == "ready" and self.phase == "idle" and not self.busy
+                             and not self.vsd.is_active() and demo["heaters_off"]
+                             and all(axis in demo["homed_axes"] for axis in "xyz")
+                             and self._status("print_stats").get("state") not in ("printing", "paused"))
         return {"api_version": 1, "version": VERSION, "phase": self.phase,
                 "revision": self.revision, "busy": self.busy,
                 "recovery_available": self.phase == "detected" and bool(points),
@@ -449,6 +711,7 @@ class Phoenix:
                 "reason": self.reason, "error": self.error,
                 "profile_ready": self.profile_ready, "checks": dict(self.checks),
                 "setup": self._setup_status(),
+                "demo": demo,
                 "selected_index": self.selected, "checkpoints": summary,
                 "assumed_position": points[-1]["machine_position"][:3] if points else None,
                 "plan": copy.deepcopy(self.plan),
@@ -460,7 +723,20 @@ class Phoenix:
                                  "automatic_resume": False}}
 
     def cmd_STATUS(self, gcmd):
-        gcmd.respond_info(json.dumps(self.get_status(self.reactor.monotonic()), indent=2))
+        if gcmd.get_int("DETAILS", 0):
+            gcmd.respond_info(json.dumps(self.get_status(self.reactor.monotonic()), indent=2))
+            return
+        if self.demo["phase"] != "off":
+            gcmd.respond_info("A demonstration is open; no real print is being recovered. Continue or finish in PHOENIX_DEMO.")
+            return
+        messages = {"idle": "No interrupted print. Recording starts automatically with your print.",
+                    "recording": "Recording the current print. No manual action needed.",
+                    "detected": "An interrupted print is available. Open PHOENIX_RECOVERY.",
+                    "prepared": "Printer parked. Clean/prime, then continue from PHOENIX_RECOVERY.",
+                    "blocked": "Recovery needs attention: " + (self.error or "Open PHOENIX_RECOVERY."),
+                    "preparing": "Preparing the printer for recovery.", "heating": "Waiting for printing temperatures.",
+                    "returning": "Returning to the selected print position."}
+        gcmd.respond_info(messages.get(self.phase, "Open PHOENIX_RECOVERY to check progress."))
 
     def cmd_SELECT(self, gcmd):
         self._require(gcmd, ("detected",))
@@ -678,7 +954,10 @@ class Phoenix:
             send("text Clean the blob and prime filament at the park point. Do not move XYZ.")
             send("footer_button Cleaned; path clear; resume|PHOENIX_RESUME CLEANED=1 PATH_CLEAR=1|primary")
         else:
-            send("text " + (self.error or "Phoenix phase: " + self.phase))
+            message = self.error or ({"idle": "No interrupted print to recover. Recording starts automatically when you print.",
+                                      "recording": "Your print is being recorded. No manual action is needed."}.get(
+                                      self.phase, "Phoenix is preparing the printer. Wait for this step to finish."))
+            send("text " + message)
         send("footer_button Close|PHOENIX_CLOSE_PROMPT|secondary")
         send("show")
 

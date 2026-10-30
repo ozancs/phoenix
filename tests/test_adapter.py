@@ -56,6 +56,9 @@ class GCode:
     def register_command(self, name, handler, **kwargs):
         self.handlers[name] = handler
 
+    def create_gcode_command(self, name, line, params):
+        return Command(**params)
+
     def respond_raw(self, message):
         self.lines.append(message)
 
@@ -98,19 +101,23 @@ class Toolhead:
     def __init__(self):
         self.position = [0., 0., 0., 0.]
         self.moves = []
+        self.homed_axes = "xyz"
 
     def get_position(self):
         return list(self.position)
 
     def get_status(self, *args):
         return {"axis_minimum": [0., 0., 0.], "axis_maximum": [250., 250., 250.],
-                "homed_axes": "xyz", "max_velocity": 200., "max_accel": 3000.}
+                "homed_axes": self.homed_axes, "max_velocity": 200., "max_accel": 3000.}
 
     def move(self, position, speed):
         self.position = list(position)
         self.moves.append((list(position), speed))
 
     def wait_moves(self):
+        pass
+
+    def dwell(self, seconds):
         pass
 
 
@@ -338,7 +345,8 @@ class AdapterTests(unittest.TestCase):
         p.cmd_CHECK(Command(ITEM="bed_attached", VALUE=0, REFRESH=1))
         self.assertFalse(p.checks["bed_attached"])
         self.assertIn("// action:prompt_show", self.printer.gcode.lines)
-        self.assertTrue(any(line.startswith("// phoenix:event ") for line in self.printer.gcode.lines))
+        self.assertGreater(p.revision, 1)
+        self.assertFalse(any(line.startswith("// phoenix:event ") for line in self.printer.gcode.lines))
 
     def test_status_supports_reconnect_and_no_sensor_claim(self):
         p = self.interrupted()
@@ -407,6 +415,87 @@ class AdapterTests(unittest.TestCase):
         self.printer.sd.current_file = object()
         p.cmd_START(Command())
         self.assertNotEqual(p.job["id"], previous)
+
+    def setup_hooks(self):
+        self.printer.settings["gcode_macro PRINT_START"] = {"gcode": "PHOENIX_START"}
+        self.printer.settings["gcode_macro PRINT_END"] = {"gcode": "PHOENIX_END"}
+
+    def test_unhomed_setup_shows_home_before_any_save_or_jog(self):
+        self.setup_hooks()
+        p = self.phoenix
+        p.profile_ready = False
+        self.printer.toolhead.homed_axes = ""
+        self.printer.gcode.lines.clear()
+        command = Command()
+        p.cmd_SETUP(command)
+        output = "\n".join(self.printer.gcode.lines)
+        self.assertIn("home printer", output)
+        self.assertNotIn("Save park", output)
+        self.assertNotIn("SETUP_JOG AXIS", output)
+        self.assertEqual(command.messages, [])
+        self.assertFalse(p._setup_status()["can_use_current"])
+
+    def test_ready_setup_has_simple_finish_screen(self):
+        self.setup_hooks()
+        self.printer.gcode.lines.clear()
+        self.phoenix.cmd_SETUP(Command())
+        output = "\n".join(self.printer.gcode.lines)
+        self.assertIn("Setup complete", output)
+        self.assertIn("Finish|PHOENIX_CLOSE_PROMPT", output)
+        self.assertNotIn("SETUP_JOG AXIS", output)
+
+    def test_jog_lifts_then_moves_xy_without_saving(self):
+        p = self.phoenix
+        self.setup_hooks()
+        self.printer.toolhead.position = [20., 20., 0., 0.]
+        p.cmd_SETUP_JOG(Command(AXIS="X", DISTANCE=10, CONFIRM=1))
+        self.assertEqual(self.printer.toolhead.moves[0][0][:3], [20., 20., 5.])
+        self.assertEqual(self.printer.toolhead.moves[1][0][:3], [30., 20., 5.])
+        self.assertFalse(p._profile_path().exists())
+
+    def test_out_of_range_jog_causes_no_lift_or_move(self):
+        self.printer.toolhead.position = [249., 20., 0., 0.]
+        with self.assertRaisesRegex(ValueError, "travel limits"):
+            self.phoenix.cmd_SETUP_JOG(Command(AXIS="X", DISTANCE=10, CONFIRM=1))
+        self.assertEqual(self.printer.toolhead.moves, [])
+
+    def test_home_requires_empty_bed_confirmation_and_idle(self):
+        p = self.phoenix
+        with self.assertRaisesRegex(ValueError, "Remove prints"):
+            p.cmd_SETUP_HOME(Command(CONFIRM=1))
+        self.assertNotIn("G28", self.printer.gcode.commands)
+        p = self.interrupted()
+        with self.assertRaisesRegex(ValueError, "recovery"):
+            p.cmd_SETUP_HOME(Command(CONFIRM=1, BED_CLEAR=1))
+        self.assertNotIn("G28", self.printer.gcode.commands)
+
+    def test_home_is_explicit_setup_only_action(self):
+        self.setup_hooks()
+        p = self.phoenix
+        p.cmd_SETUP_HOME(Command(CONFIRM=1, BED_CLEAR=1))
+        self.assertIn("G28", self.printer.gcode.commands)
+        self.assertFalse(p.busy)
+        self.assertTrue(any("Save park and finish" in line for line in self.printer.gcode.lines))
+
+    def test_save_and_finish_closes_prompt_without_json(self):
+        self.setup_hooks()
+        command = Command(USE_CURRENT=1, CONFIRM=1, FINISH=1)
+        self.phoenix.cmd_SETUP_PROFILE(command)
+        self.assertEqual(self.printer.gcode.lines[-1], "// action:prompt_end")
+        self.assertEqual(len(command.messages), 1)
+        self.assertNotIn("{", command.messages[0])
+
+    def test_idle_check_explains_no_interrupted_print(self):
+        with self.assertRaisesRegex(ValueError, "no interrupted print"):
+            self.phoenix.cmd_CHECK(Command())
+
+    def test_status_is_human_readable_unless_details_requested(self):
+        command = Command()
+        self.phoenix.cmd_STATUS(command)
+        self.assertNotIn("{", command.messages[0])
+        details = Command(DETAILS=1)
+        self.phoenix.cmd_STATUS(details)
+        self.assertIn('"api_version"', details.messages[0])
 
 
 if __name__ == "__main__":

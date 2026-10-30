@@ -6,7 +6,7 @@ Phoenix records recent print states and helps an operator prepare, inspect and r
 an interrupted Klipper virtual-SD print. It works through ordinary G-code commands
 in Mainsail and Fluidd, with a versioned status interface for a native Voyager experience.
 
-**0.2.0 is experimental, not a hardware-validated release.**
+**0.3.0 is experimental, not a hardware-validated release.**
 Host-side tests pass; real printer validation is still required. A GitHub repository is available; no real printer validation has been performed here.
 
 ## Design decisions
@@ -31,7 +31,7 @@ Host-side tests pass; real printer validation is still required. A GitHub reposi
 - A durable recovery fence: a restart during preparation cannot silently reuse the old Z.
 - Standard `action:prompt_*` checklist for clients supporting that protocol; console
   commands work independently of prompt support.
-- Moonraker-visible `phoenix` status and machine-readable event hints for Voyager.
+- Moonraker-visible `phoenix` status for Voyager, without machine-event noise in the console.
 - Voyager client helpers, a theme-inheriting animated guide component and integration brief.
 
 The native Voyager wizard is **not installed or integrated** yet. See
@@ -105,8 +105,10 @@ PHOENIX_SETUP
 
 The guide reports loaded module, configuration compatibility, print hooks and park
 profile readiness. On an empty bed, use normal controls to position XY at a clear
-park point, then explicitly accept that point and the route. Phoenix does not move
-or home the printer during setup. For typed machine coordinates:
+park point, then explicitly accept that point and the route. The guide requests
+homing before offering jog/save controls. Normal homing is an explicit empty-bed
+setup action; recovery still never homes Z. XY jog buttons lift for clearance first.
+Use **Save park and finish** to close the guide. For typed machine coordinates:
 
 ```gcode
 ; Example only: use your own reviewed park coordinates and clearance.
@@ -127,6 +129,18 @@ Optional nominal layer metadata, using your slicer's actual placeholder:
 
 Z-hop remains supported without this optional command. After setup, follow
 [the first-printer test plan](docs/TESTING.md).
+
+### Everyday use and demo
+
+After setup, print normally. The installed print hooks start and stop recording;
+you do not manually run CHECK, START, END, PREPARE or RESUME. Open PHOENIX_RECOVERY
+only when an interrupted print is available. PHOENIX_SETUP_GUIDE is for initial
+setup or changing the park point. Low-level commands remain for automation/API
+compatibility, not as a list of routine tasks.
+
+To see the flow on an empty bed, run **PHOENIX_DEMO**. It chooses bounded XYZ points,
+parks, simulates heating without enabling heaters, signals with three part-fan
+pulses and returns to the same point without extrusion. See [demo guide](docs/DEMO.md).
 
 ### Recovery
 

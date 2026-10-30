@@ -196,3 +196,27 @@ def recovery_plan(latest, selected, clearance, park, limits):
             if not math.isfinite(value) or not limits[0][axis] <= value <= limits[1][axis]:
                 raise ValueError("%s exceeds %s travel limits" % (label, "XYZ"[axis]))
     return points
+
+
+def demo_plan(current, limits, clearance):
+    """Empty-bed demonstration waypoints, bounded by actual machine limits."""
+    low, high = [list(edge)[:3] for edge in limits]
+    if (len(current) < 3 or len(low) != 3 or len(high) != 3
+            or not all(math.isfinite(v) for v in list(current[:3]) + low + high)
+            or not math.isfinite(clearance) or clearance <= 0):
+        raise ValueError("Invalid printer travel limits")
+    span = [hi - lo for lo, hi in zip(low, high)]
+    if any(value <= 0 for value in span):
+        raise ValueError("Printer travel range is empty")
+    if any(not low[i] <= current[i] <= high[i] for i in range(3)):
+        raise ValueError("Current position is outside the printer travel limits")
+    margin = min(clearance, span[2] * .1)
+    origin = [low[0] + span[0] * .6, low[1] + span[1] * .55,
+              low[2] + min(max(10., margin * 2), span[2] * .3)]
+    initial_z = min(max(current[2], origin[2]) + margin, high[2])
+    travel_z = origin[2] + margin
+    return {"initial_lift": [current[0], current[1], initial_z],
+            "initial_above": [origin[0], origin[1], initial_z], "origin": origin,
+            "lift": [origin[0], origin[1], travel_z],
+            "park": [low[0] + span[0] * .1, low[1] + span[1] * .1, travel_z],
+            "above_origin": [origin[0], origin[1], travel_z]}

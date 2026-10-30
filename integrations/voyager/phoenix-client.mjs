@@ -48,9 +48,11 @@ export function resumeCommand(status, cleaned, pathClear) {
 }
 
 export function setupProfileCommand(status, { x, y, clearance, useCurrent = false, confirmed = false }) {
-  if (status?.api_version !== 1 || status.phase !== 'idle' || status.busy || confirmed !== true) {
+  if (status?.api_version !== 1 || status.phase !== 'idle' || status.busy || confirmed !== true
+    || status.setup?.can_edit === false) {
     throw new Error('Setup requires idle state and explicit profile confirmation');
   }
+  if (useCurrent && status.setup?.can_use_current === false) throw new Error('Home before selecting the current park point');
   const values = useCurrent ? [] : [x, y];
   if (values.some((value) => !Number.isFinite(value))) throw new Error('Invalid park coordinates');
   if (!Number.isFinite(clearance) || clearance <= 0) throw new Error('Invalid clearance');

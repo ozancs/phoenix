@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 — 2026-10-30
+
+- Setup now checks homing before offering park selection; explicit empty-bed home,
+  bounded 1/10 mm XY jog and Save park and finish replace the raw setup report.
+- Routine console JSON/events removed; DETAILS=1 remains for diagnostics.
+- Human-readable action errors replace internal phase names. Normal printing needs
+  no manual Phoenix commands; low-level hooks remain compatible.
+- Adds PHOENIX_DEMO: bounded empty-bed movements, simulated interruption/checklist,
+  park, pretend heat, three part-fan pulses, fan restoration and return to the same
+  XYZ. No heaters, extrusion, real recovery journal or file-resume operations.
+- Exposes setup affordances and separate demo state for native Voyager integration.
+- Host tests cover unhomed controls, setup jog limits, no-motion menu opening,
+  complete demo, fan failure restoration and 200 varied machine-limit examples.
+  Real printer validation of this version remains pending.
+
 ## 0.2.0 — 2026-10-30
 
 - Guided installer scans includes and previews changes, then backs up edited files.
