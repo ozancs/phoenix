@@ -1,0 +1,108 @@
+{
+  "api_version": 1,
+  "version": "0.1.0",
+  "phase": "blocked",
+  "revision": 1,
+  "busy": false,
+  "recovery_available": false,
+  "job_id": "phoenix-demo-job",
+  "filename": "example.gcode",
+  "file_size": 32,
+  "reason": "unclean_shutdown",
+  "error": "Recovery was interrupted after preparation began. Position needs manual review.",
+  "profile_ready": true,
+  "checks": {
+    "bed_attached": true,
+    "axes_unmoved": true,
+    "plate_unmoved": true,
+    "nozzle_free": true,
+    "path_clear": true,
+    "uncertainty_accepted": true
+  },
+  "selected_index": 0,
+  "checkpoints": [
+    {
+      "id": "point",
+      "index": 0,
+      "saved_at": 1000.0,
+      "offset": 20,
+      "machine_position": [
+        130.0,
+        100.0,
+        20.6
+      ],
+      "gcode_position": [
+        130.0,
+        100.0,
+        20.6
+      ],
+      "layer_z": 20.0,
+      "z_above_layer": 0.6000000000000014
+    },
+    {
+      "id": "point",
+      "index": 1,
+      "saved_at": 1000.0,
+      "offset": 12,
+      "machine_position": [
+        100.0,
+        100.0,
+        20.0
+      ],
+      "gcode_position": [
+        100.0,
+        100.0,
+        20.0
+      ],
+      "layer_z": 20.0,
+      "z_above_layer": 0.0
+    }
+  ],
+  "assumed_position": [
+    130.0,
+    100.0,
+    20.6
+  ],
+  "plan": {
+    "assumed": [
+      130,
+      100,
+      20.6
+    ],
+    "lift": [
+      130,
+      100,
+      25.6
+    ],
+    "park": [
+      10,
+      10,
+      25.6
+    ],
+    "above_target": [
+      130,
+      100,
+      25.6
+    ],
+    "target": [
+      130,
+      100,
+      20.6
+    ]
+  },
+  "storage_error": null,
+  "journal_fallback": false,
+  "uncertainties": [
+    "axes_assumed_unchanged",
+    "queued_motion",
+    "z_hop",
+    "sample_gap"
+  ],
+  "capabilities": {
+    "z_homing": false,
+    "z_hop": true,
+    "checkpoint_selection": true,
+    "arbitrary_line_selection": false,
+    "automatic_resume": false
+  }
+}
