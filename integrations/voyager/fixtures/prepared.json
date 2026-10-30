@@ -1,6 +1,6 @@
 {
   "api_version": 1,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "phase": "prepared",
   "revision": 1,
   "busy": false,
@@ -104,5 +104,51 @@
     "checkpoint_selection": true,
     "arbitrary_line_selection": false,
     "automatic_resume": false
+  },
+  "setup": {
+    "complete": true,
+    "profile_ready": true,
+    "profile_error": null,
+    "park": [
+      10.0,
+      10.0
+    ],
+    "clearance": 5.0,
+    "hooks": {
+      "start": [
+        "PRINT_START"
+      ],
+      "end": [
+        "PRINT_END"
+      ]
+    },
+    "slicer_confirmed": false,
+    "steps": [
+      {
+        "id": "module",
+        "state": "ok",
+        "message": "Phoenix module loaded"
+      },
+      {
+        "id": "printer",
+        "state": "ok",
+        "message": "Printer configuration supported"
+      },
+      {
+        "id": "hooks",
+        "state": "ok",
+        "message": "Print hooks found/confirmed"
+      },
+      {
+        "id": "park",
+        "state": "ok",
+        "message": "Reviewed park point"
+      },
+      {
+        "id": "test",
+        "state": "manual",
+        "message": "Verify recording on a small supervised test print"
+      }
+    ]
   }
 }

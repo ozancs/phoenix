@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CHECKS, parsePhoenixEvent, checkCommand, selectCommand, createAlertObserver,
-  canPrepare, prepareCommand, resumeCommand } from '../integrations/voyager/phoenix-client.mjs';
+  canPrepare, prepareCommand, resumeCommand, setupProfileCommand } from '../integrations/voyager/phoenix-client.mjs';
 
 test('malformed/unrelated/future-version events are ignored', () => {
   for (const line of [null, 'hello', '// phoenix:event {', '// phoenix:event {"api_version":2}']) {
@@ -40,4 +40,14 @@ test('reconnect does not spam, printer and job changes still notify', () => {
   assert.equal(alerts.length, 3);
   assert.equal(alerts[0].action, 'open_phoenix');
   assert.equal(alerts[0].title, 'Interrupted print detected');
+});
+test('setup profile requires explicit idle confirmation and finite coordinates', () => {
+  const status = { api_version: 1, phase: 'idle', busy: false };
+  const options = { x: 10, y: 20, clearance: 5, confirmed: true };
+  assert.equal(setupProfileCommand(status, options), 'PHOENIX_SETUP_PROFILE X=10 Y=20 CLEARANCE=5 CONFIRM=1');
+  for (const x of [NaN, Infinity, '10\nG28']) assert.throws(() => setupProfileCommand(status, { ...options, x }));
+  assert.throws(() => setupProfileCommand({ ...status, phase: 'detected' }, options));
+  assert.throws(() => setupProfileCommand(status, { ...options, confirmed: false }));
+  assert.equal(setupProfileCommand(status, { ...options, useCurrent: true }),
+    'PHOENIX_SETUP_PROFILE USE_CURRENT=1 CLEARANCE=5 CONFIRM=1');
 });

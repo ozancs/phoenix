@@ -6,14 +6,16 @@ SPDX-License-Identifier: GPL-3.0-or-later
 import copy
 import json
 import logging
+import math
+from pathlib import Path
 import re
 import time
 import uuid
 
-from .phoenix_core import (Journal, JournalWriter, digest, file_identity,
+from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, digest, file_identity,
                            recovery_plan, verify_file)
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
@@ -35,6 +37,8 @@ class Phoenix:
         self.interval = config.getfloat("save_interval", 2., minval=0.5)
         self.history_size = config.getint("history_size", 30, minval=2, maxval=120)
         self.profile_ready = config.getboolean("profile_ready", False)
+        self.profile_error = None
+        self.slicer_confirmed = False
         self.park = [config.getfloat("park_x", 0.), config.getfloat("park_y", 0.)]
         self.clearance = config.getfloat("clearance", 5., above=0.)
         self.travel_speed = config.getfloat("travel_speed", 40., above=0., maxval=100.)
@@ -46,6 +50,7 @@ class Phoenix:
         self.vsd = self.printer.load_object(config, "virtual_sdcard")
         self.move = self.printer.load_object(config, "gcode_move")
         self.active = False
+        self.active_file = None
         self.phase = "idle"
         self.reason = ""
         self.job = None
@@ -58,7 +63,8 @@ class Phoenix:
         self.busy = False
         self.journal = self.writer = None
         for name in ("START", "END", "STATUS", "SELECT", "CHECK", "PREPARE",
-                     "RESUME", "DISCARD", "PROMPT", "LAYER"):
+                     "RESUME", "DISCARD", "PROMPT", "LAYER", "SETUP",
+                     "SETUP_PROFILE", "SETUP_SLICER"):
             self.gcode.register_command("PHOENIX_" + name, getattr(self, "cmd_" + name),
                                         desc="Phoenix " + name.lower())
         self.printer.register_event_handler("klippy:ready", self._ready)
@@ -69,6 +75,7 @@ class Phoenix:
     def _ready(self):
         self.toolhead = self.printer.lookup_object("toolhead")
         self.configfile = self.printer.lookup_object("configfile")
+        self._load_setup_profile()
         try:
             self.journal = Journal(self.directory)
             self.job = self.journal.load()
@@ -85,6 +92,8 @@ class Phoenix:
                 self.phase = "blocked"
                 self.error = self.job.get("error", "Previous Phoenix operation failed")
             self._event("ready")
+            if not self._setup_status()["complete"]:
+                self.gcode.respond_info("Phoenix setup needs attention. Open PHOENIX_SETUP_GUIDE or run PHOENIX_SETUP.")
             if self.phase in ("detected", "blocked"):
                 self.gcode.respond_info("Phoenix: interrupted print detected (power loss or restart). "
                                         "No automatic motion. Run PHOENIX_PROMPT or PHOENIX_STATUS.")
@@ -127,6 +136,141 @@ class Phoenix:
 
     def _config_hash(self):
         return digest(self._settings())
+
+    def _profile_path(self):
+        return Path(self.directory).expanduser() / "setup-profile.json"
+
+    def _load_setup_profile(self):
+        path = self._profile_path()
+        if not path.exists():
+            return
+        try:
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+            profile = envelope["profile"]
+            if digest(profile) != envelope["sha256"] or profile["schema"] != 1:
+                raise ValueError("Setup profile is corrupt; review the park point again")
+            if profile["config_hash"] != self._config_hash():
+                raise ValueError("Printer configuration changed; review the park point again")
+            self._validate_park(profile["park"], profile["clearance"])
+            self.park, self.clearance = profile["park"], profile["clearance"]
+            self.profile_ready = bool(profile["reviewed"])
+            self.slicer_confirmed = bool(profile.get("slicer_confirmed", False))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self.profile_ready = False
+            self.profile_error = str(exc)
+
+    def _validate_park(self, park, clearance):
+        status = self.toolhead.get_status(self.reactor.monotonic())
+        if len(park) != 2 or not all(math.isfinite(v) for v in park):
+            raise ValueError("Invalid park coordinates")
+        for axis, value in enumerate(park):
+            if not status["axis_minimum"][axis] <= value <= status["axis_maximum"][axis]:
+                raise ValueError("Park point exceeds travel limits")
+        if not math.isfinite(clearance) or not 0 < clearance <= status["axis_maximum"][2] - status["axis_minimum"][2]:
+            raise ValueError("Invalid Z clearance")
+
+    def _persist_setup_profile(self):
+        profile = {"schema": 1, "config_hash": self._config_hash(), "park": self.park,
+                   "clearance": self.clearance, "reviewed": self.profile_ready,
+                   "slicer_confirmed": self.slicer_confirmed}
+        atomic_write(self._profile_path(), canonical({"profile": profile, "sha256": digest(profile)}))
+
+    def _setup_status(self):
+        settings = self._settings()
+        compatible_error = None
+        try:
+            self._compatible()
+        except ValueError as exc:
+            compatible_error = str(exc)
+        hooks = {"start": [], "end": []}
+        for name, options in settings.items():
+            if name.startswith("gcode_macro "):
+                for kind, command in (("start", "PHOENIX_START"), ("end", "PHOENIX_END")):
+                    if re.search(r"^\s*" + command + r"(?:\s|$)", options.get("gcode", ""), re.M):
+                        hooks[kind].append(name[12:])
+        connected = all(hooks.values()) or self.slicer_confirmed
+        return {"complete": self.profile_ready and connected and not self.profile_error and not compatible_error,
+                "profile_ready": self.profile_ready, "profile_error": self.profile_error,
+                "park": list(self.park), "clearance": self.clearance,
+                "hooks": hooks, "slicer_confirmed": self.slicer_confirmed,
+                "steps": [
+                    {"id": "module", "state": "ok", "message": "Phoenix module loaded"},
+                    {"id": "printer", "state": "blocked" if compatible_error else "ok",
+                     "message": compatible_error or "Printer configuration supported"},
+                    {"id": "hooks", "state": "ok" if connected else "needs_action",
+                     "message": "Print hooks found/confirmed" if connected else
+                     "Rerun setup to connect macros, or add PHOENIX_START/PHOENIX_END in your slicer"},
+                    {"id": "park", "state": "ok" if self.profile_ready else "needs_action",
+                     "message": self.profile_error or "Review a clear park point and route with an empty bed"},
+                    {"id": "test", "state": "manual", "message": "Verify recording on a small supervised test print"}]}
+
+    def cmd_SETUP(self, gcmd):
+        status = self._setup_status()
+        gcmd.respond_info(json.dumps(status, indent=2))
+        if not gcmd.get_int("PROMPT", 1):
+            return
+        send = lambda line: self.gcode.respond_raw("// action:prompt_" + line)
+        send("begin Phoenix setup")
+        for step in status["steps"]:
+            send("text [%s] %s" % (step["state"], step["message"]))
+        send("text This guide never homes, heats or moves the printer. No Z homing for recovery.")
+        send("text Empty the bed; use normal controls to position XY at a clear park point. Review the lift and return path.")
+        send("text For typed coordinates: PHOENIX_SETUP_PROFILE X=10 Y=10 CLEARANCE=5 CONFIRM=1 (use your own values).")
+        send("text Current park: X=%.3f Y=%.3f; clearance %.3f mm" % (self.park[0], self.park[1], self.clearance))
+        if self.phase == "idle" and not self.vsd.is_active():
+            send("button Use current XY; I reviewed the route|PHOENIX_SETUP_PROFILE USE_CURRENT=1 CONFIRM=1 REFRESH=1|primary")
+            if not all(status["hooks"].values()) and not self.slicer_confirmed:
+                send("text No automatic slicer access: add START after initialization and END before parking/heaters off. Reslice existing files.")
+                send("button I added both slicer commands|PHOENIX_SETUP_SLICER CONFIRM=1 REFRESH=1|secondary")
+        else:
+            send("text Setup edits are disabled while a print or recovery exists.")
+        send("footer_button Recheck|PHOENIX_SETUP|primary")
+        send("footer_button Close|PHOENIX_CLOSE_PROMPT|secondary")
+        send("show")
+
+    def _setup_edit_allowed(self, gcmd):
+        self._require(gcmd, ("idle",))
+        if self.vsd.is_active() or self._status("print_stats").get("state") in ("printing", "paused"):
+            raise gcmd.error("Finish the print before editing setup")
+        if gcmd.get_int("CONFIRM", 0) != 1:
+            raise gcmd.error("Review the setup and explicitly confirm with CONFIRM=1")
+
+    def cmd_SETUP_PROFILE(self, gcmd):
+        self._setup_edit_allowed(gcmd)
+        if gcmd.get_int("USE_CURRENT", 0):
+            homed = self.toolhead.get_status(self.reactor.monotonic())["homed_axes"]
+            if not all(axis in homed for axis in "xy"):
+                raise gcmd.error("XY is not homed. Position it using normal controls on an empty bed first.")
+            self.toolhead.wait_moves()
+            park = list(self.toolhead.get_position())[:2]
+        else:
+            park = [gcmd.get_float("X"), gcmd.get_float("Y")]
+        clearance = gcmd.get_float("CLEARANCE", self.clearance, above=0.)
+        old = self.park, self.clearance, self.profile_ready, self.profile_error
+        try:
+            self._validate_park(park, clearance)
+            self.park, self.clearance, self.profile_ready, self.profile_error = park, clearance, True, None
+            self._persist_setup_profile()
+        except (OSError, ValueError) as exc:
+            self.park, self.clearance, self.profile_ready, self.profile_error = old
+            raise gcmd.error(str(exc))
+        self._event("setup_changed")
+        gcmd.respond_info("Phoenix park profile saved. No restart or SAVE_CONFIG needed; nothing moved.")
+        if gcmd.get_int("REFRESH", 0):
+            self.cmd_SETUP(gcmd)
+
+    def cmd_SETUP_SLICER(self, gcmd):
+        self._setup_edit_allowed(gcmd)
+        old = self.slicer_confirmed
+        self.slicer_confirmed = True
+        try:
+            self._persist_setup_profile()
+        except OSError as exc:
+            self.slicer_confirmed = old
+            raise gcmd.error(str(exc))
+        self._event("setup_changed")
+        if gcmd.get_int("REFRESH", 0):
+            self.cmd_SETUP(gcmd)
 
     def _status(self, name):
         obj = self.printer.lookup_object(name, None)
@@ -205,6 +349,8 @@ class Phoenix:
             if (not self.vsd.is_active() or self.vsd.is_cmd_from_sd()
                     or self.gcode.get_mutex().test()):
                 return eventtime + min(self.interval, 0.1)
+            if self.active_file is not None and getattr(self.vsd, "current_file", None) is not self.active_file:
+                raise ValueError("Virtual-SD source changed without a Phoenix start hook")
             with self.gcode.get_mutex():
                 snapshot = self._snapshot()
             if snapshot and snapshot["offset"] < self.job["file"]["size"]:
@@ -245,6 +391,16 @@ class Phoenix:
             raise ValueError("Enable [force_move] enable_force_move: True for explicit recovery")
 
     def cmd_START(self, gcmd):
+        if self.active and self.vsd.is_cmd_from_sd():
+            # Existing slicer hooks may coexist with newly installed macro hooks.
+            current = getattr(self.vsd, "current_file", None)
+            if current is not None and current is self.active_file:
+                return
+            # A freshly opened virtual-SD file must never inherit the previous job.
+            try:
+                self._finish("replaced")
+            except Exception as exc:
+                raise gcmd.error(str(exc))
         self._require(gcmd, ("idle",))
         if not self.vsd.is_cmd_from_sd() or not self.vsd.file_path():
             raise gcmd.error("PHOENIX_START must run inside a virtual-SD print")
@@ -260,6 +416,7 @@ class Phoenix:
             self.journal.save(self.job)
             self.journal.clear_fence()
             self.active, self.phase, self.layer_z = True, "recording", None
+            self.active_file = getattr(self.vsd, "current_file", None)
             self.error = None
             self._event("recording_started")
         except Exception as exc:
@@ -291,6 +448,7 @@ class Phoenix:
                 "file_size": self.job.get("file", {}).get("size") if self.job else None,
                 "reason": self.reason, "error": self.error,
                 "profile_ready": self.profile_ready, "checks": dict(self.checks),
+                "setup": self._setup_status(),
                 "selected_index": self.selected, "checkpoints": summary,
                 "assumed_position": points[-1]["machine_position"][:3] if points else None,
                 "plan": copy.deepcopy(self.plan),
@@ -369,7 +527,7 @@ class Phoenix:
     def cmd_PREPARE(self, gcmd):
         self._require(gcmd, ("detected",))
         if not self.profile_ready:
-            raise gcmd.error("Configure and review park position/path, then set profile_ready: True")
+            raise gcmd.error("Open PHOENIX_SETUP to review/save the park profile (profile_ready is false)")
         if not all(self.checks.values()):
             raise gcmd.error("Complete every Phoenix checklist item first")
         self.busy = True
@@ -478,6 +636,7 @@ class Phoenix:
             self.journal.clear_fence()
             self.selected = 0
             self.active, self.phase = True, "recording"
+            self.active_file = getattr(self.vsd, "current_file", None)
             self.checks = {key: False for key in CHECKS}
             self.vsd.do_resume()
             self._event("resumed")

@@ -123,6 +123,7 @@ class SD:
         self.next_file_position = 12
         self.active = self.from_sd = False
         self.loaded = None
+        self.current_file = object()
 
     def get_status(self, *args):
         return {}
@@ -141,6 +142,7 @@ class SD:
 
     def _load_file(self, gcmd, filename, check_subdirs=False):
         self.loaded = filename
+        self.current_file = object()
 
     def do_resume(self):
         self.active = True
@@ -346,6 +348,65 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(status["capabilities"]["z_homing"])
         self.assertTrue(status["capabilities"]["z_hop"])
         self.assertEqual(status["assumed_position"], [130., 100., 20.6])
+
+    def test_setup_profile_persists_without_movement_or_restart(self):
+        p = self.phoenix
+        p.cmd_SETUP_PROFILE(Command(X=15, Y=25, CLEARANCE=7, CONFIRM=1))
+        self.assertEqual(self.printer.toolhead.moves, [])
+        boot = Phoenix(self.config)
+        boot._ready()
+        self.assertEqual(boot.park, [15., 25.])
+        self.assertEqual(boot.clearance, 7.)
+        self.assertTrue(boot.profile_ready)
+        self.assertFalse(any(line in ("RESTART", "SAVE_CONFIG") for line in self.printer.gcode.commands))
+
+    def test_setup_profile_config_change_requires_review(self):
+        self.phoenix.cmd_SETUP_PROFILE(Command(X=15, Y=25, CONFIRM=1))
+        self.printer.settings["stepper_z"] = {"position_max": 260}
+        boot = Phoenix(self.config)
+        boot._ready()
+        self.assertFalse(boot.profile_ready)
+        self.assertIn("configuration changed", boot.profile_error)
+
+    def test_setup_is_blocked_during_recovery_and_active_print(self):
+        p = self.interrupted()
+        with self.assertRaises(ValueError):
+            p.cmd_SETUP_PROFILE(Command(X=15, Y=25, CONFIRM=1))
+        p.phase = "idle"
+        self.printer.sd.active = True
+        with self.assertRaises(ValueError):
+            p.cmd_SETUP_SLICER(Command(CONFIRM=1))
+
+    def test_setup_detects_hooks_but_not_comment_examples(self):
+        self.printer.settings["gcode_macro PRINT_START"] = {"gcode": "# PHOENIX_START\nG28"}
+        self.assertFalse(self.phoenix._setup_status()["hooks"]["start"])
+        self.printer.settings["gcode_macro PRINT_START"]["gcode"] += "\nPHOENIX_START"
+        self.assertEqual(self.phoenix._setup_status()["hooks"]["start"], ["PRINT_START"])
+
+    def test_setup_out_of_range_never_enables_profile(self):
+        p = self.phoenix
+        p.profile_ready = False
+        with self.assertRaises(ValueError):
+            p.cmd_SETUP_PROFILE(Command(X=999, Y=25, CONFIRM=1))
+        self.assertFalse(p.profile_ready)
+        self.assertFalse(p._profile_path().exists())
+
+    def test_duplicate_start_hook_keeps_existing_job(self):
+        self.printer.sd.from_sd = True
+        p = self.phoenix
+        p.cmd_START(Command())
+        job_id = p.job["id"]
+        p.cmd_START(Command())
+        self.assertEqual(p.job["id"], job_id)
+
+    def test_new_virtual_sd_file_does_not_inherit_old_job(self):
+        self.printer.sd.from_sd = True
+        p = self.phoenix
+        p.cmd_START(Command())
+        previous = p.job["id"]
+        self.printer.sd.current_file = object()
+        p.cmd_START(Command())
+        self.assertNotEqual(p.job["id"], previous)
 
 
 if __name__ == "__main__":

@@ -6,9 +6,8 @@ Phoenix records recent print states and helps an operator prepare, inspect and r
 an interrupted Klipper virtual-SD print. It works through ordinary G-code commands
 in Mainsail and Fluidd, with a versioned status interface for a native Voyager experience.
 
-**0.1.0 is an experimental first implementation, not a hardware-validated release.**
-Host-side tests pass; real printer validation is still required. No GitHub repository,
-remote deployment or printer installation has been performed by creating this project.
+**0.2.0 is experimental, not a hardware-validated release.**
+Host-side tests pass; real printer validation is still required. A GitHub repository is available; no real printer validation has been performed here.
 
 ## Design decisions
 
@@ -54,52 +53,80 @@ for a custom configuration simply because it loads. Start with the documented sc
 Sequential object printing can place a taller obstacle in the parking route; collision
 checking is operator/profile based, not a complete model geometry analysis.
 
-## Install on a Klipper host
+## Guided installation
 
-Copy this directory to the host (later: clone its GitHub repository), then:
+For a public repository / an already authenticated clone:
 
 ```sh
+cd ~
+git clone https://github.com/ozancs/phoenix.git phoenix-for-klipper
 cd ~/phoenix-for-klipper
 bash scripts/install.sh
 ```
 
-For custom paths:
+**Private repository?** Follow [the deploy-key bootstrap](docs/PRIVATE-REPO.md) first.
+A read-only SSH deploy key is enough; no GitHub token in printer configuration.
+
+The installer shows its changes and asks to apply them. It automatically:
+
+- Traverses printer.cfg includes (including globs) and checks existing configuration.
+- Installs module links, adds the missing include, and merges an existing force_move section.
+- Adds PHOENIX_START at the end of PRINT_START/START_PRINT and PHOENIX_END at the
+  beginning of PRINT_END/END_PRINT, when the choice is unambiguous.
+- Adds Phoenix to Moonraker Update Manager, using the clone's remote and dev channel.
+- Saves originals and a manifest under printer_data/phoenix-setup-backups/ before edits.
+- Offers to restart only when Moonraker confirms the printer is idle. Unknown/paused/
+  printing states do not trigger a restart. With --yes, restart requires --restart.
+
+Rerun it safely to add missing parts; it preserves existing park settings. Preview only:
 
 ```sh
-KLIPPER_DIR=~/klipper CONFIG_DIR=~/printer_data/config bash scripts/install.sh
+bash scripts/install.sh --check
 ```
 
-The installer links two modules and copies an example config only if it is absent.
-It does not overwrite `printer.cfg`, restart services or enable recovery motion.
+Custom instance / macro names:
 
-1. Merge `[force_move]` with your existing section if present.
-2. Add `[include phoenix.cfg]` to `printer.cfg`.
-3. Review machine-coordinate `park_x`, `park_y`, `clearance`, speeds and optional
-   `home_xy_gcode`. Only after checking your printer, set `profile_ready: True`.
-4. Restart Klipper while idle.
-5. Run `PHOENIX_STATUS`.
+```sh
+bash scripts/install.sh --config-dir ~/printer_2_data/config --moonraker-url http://127.0.0.1:7126 \
+  --start-macro MY_PRINT_START --end-macro MY_PRINT_END
+```
 
-Default recovery does not home XY either: all axes are assumed unchanged. Optional
-XY homing can re-establish XY, but its macros must never home/move Z. An existing
-`homing_override` may make `G28 X Y` do more than expected. Review it first.
+If macros are absent or ambiguous, setup tells you exactly what remains. It cannot
+edit a slicer on another computer. In that case add PHOENIX_START after initialization,
+PHOENIX_END before end/park/heater-off actions, and reslice. Existing files are not rewritten.
+Do not run install during a print. Configs outside the selected instance, duplicate
+sections, missing includes or uncertain inline macro bodies stop the automated edit.
 
-### Slicer / macro integration
+After reconnect, open **PHOENIX_SETUP_GUIDE** from the macro list, or run:
 
 ```gcode
-; After PRINT_START and setup, before printing the model:
-PHOENIX_START
-
-; Optional, at each layer, using your slicer's nominal layer-height variable:
-; PHOENIX_LAYER Z=<nominal layer Z>
-
-; After the last model extrusion, before PRINT_END / parking / motor disable:
-PHOENIX_END
+PHOENIX_SETUP
 ```
 
-Do not insert literal `<nominal layer Z>` into a file. The layer command is optional
-metadata; it is not needed for recording actual commanded Z, including hops. Add
-START/END once, either in slicer code or print macros, not both. START must execute
-inside a virtual-SD job. END waits for outstanding moves before clearing recovery.
+The guide reports loaded module, configuration compatibility, print hooks and park
+profile readiness. On an empty bed, use normal controls to position XY at a clear
+park point, then explicitly accept that point and the route. Phoenix does not move
+or home the printer during setup. For typed machine coordinates:
+
+```gcode
+; Example only: use your own reviewed park coordinates and clearance.
+PHOENIX_SETUP_PROFILE X=10 Y=10 CLEARANCE=5 CONFIRM=1
+```
+
+The reviewed profile is saved in Phoenix's own checksummed setup-profile.json and
+applies immediately. No SAVE_CONFIG or second restart is needed. It overrides the
+example config's unreviewed park defaults. A changed printer configuration invalidates
+that review. If you use slicer-only hooks, the guide lets you acknowledge adding them;
+that acknowledgement is not a claim that Phoenix inspected your slicer.
+
+Optional nominal layer metadata, using your slicer's actual placeholder:
+
+```gcode
+; PHOENIX_LAYER Z=<nominal layer Z>
+```
+
+Z-hop remains supported without this optional command. After setup, follow
+[the first-printer test plan](docs/TESTING.md).
 
 ### Recovery
 

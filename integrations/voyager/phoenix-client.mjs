@@ -47,6 +47,16 @@ export function resumeCommand(status, cleaned, pathClear) {
   return 'PHOENIX_RESUME CLEANED=1 PATH_CLEAR=1';
 }
 
+export function setupProfileCommand(status, { x, y, clearance, useCurrent = false, confirmed = false }) {
+  if (status?.api_version !== 1 || status.phase !== 'idle' || status.busy || confirmed !== true) {
+    throw new Error('Setup requires idle state and explicit profile confirmation');
+  }
+  const values = useCurrent ? [] : [x, y];
+  if (values.some((value) => !Number.isFinite(value))) throw new Error('Invalid park coordinates');
+  if (!Number.isFinite(clearance) || clearance <= 0) throw new Error('Invalid clearance');
+  return `PHOENIX_SETUP_PROFILE ${useCurrent ? 'USE_CURRENT=1' : `X=${x} Y=${y}`} CLEARANCE=${clearance} CONFIRM=1`;
+}
+
 export function createAlertObserver(onAlert) {
   const seen = new Set();
   return (printerKey, status) => {
