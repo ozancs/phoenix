@@ -59,6 +59,8 @@ class DemoTests(unittest.TestCase):
 
     def test_full_demo_returns_to_same_point_and_restores_fan(self):
         changes = []
+        dwells = []
+        self.printer.toolhead.dwell = dwells.append
         driver = SimpleNamespace(set_speed_from_command=lambda speed: changes.append(speed))
         self.printer.objects["fan"] = SimpleNamespace(fan=driver, get_status=lambda t: {"speed": .35})
         self.start()
@@ -73,7 +75,10 @@ class DemoTests(unittest.TestCase):
         self.assertIsNone(self.printer.sd.loaded)
         self.assertFalse(self.printer.sd.active)
         self.assertFalse(self.phoenix.active)
-        self.assertEqual(self.printer.gcode.commands, [])
+        self.assertEqual(self.printer.gcode.commands, ["G28 X Y"])
+        self.assertEqual(dwells, [2., 2., 1., 2., 1., 2., 1.])
+        for message in ("Lifting", "Homing X and Y", "Moving to park", "Simulating warm-up", "Part fan", "Returning"):
+            self.assertTrue(any(message in line for line in self.printer.gcode.lines), message)
         self.assertTrue(all(move[0][3] == origin[3] for move in self.printer.toolhead.moves))
 
     def test_position_change_blocks_demo_return(self):
@@ -144,3 +149,56 @@ class DemoTests(unittest.TestCase):
         self.printer.toolhead.position = [50., 50., 250., 0.]
         self.start()
         self.assertTrue(all(move[0][2] <= 250 for move in self.printer.toolhead.moves))
+
+    def test_demo_uses_reviewed_park_and_homes_before_parking(self):
+        self.phoenix.profile_ready = True
+        self.phoenix.park = [210., 180.]
+        self.start()
+        self.assertEqual(self.phoenix.demo["plan"]["park"][:2], [210., 180.])
+        def homing(script):
+            self.assertEqual(script, "G28 X Y")
+            self.assertEqual(self.printer.toolhead.position[:3], self.phoenix.demo["plan"]["lift"])
+            self.phoenix._homing_begin(SimpleNamespace(get_axes=lambda: [0, 1]), [])
+            self.printer.toolhead.position[:2] = [0., 0.]
+        self.printer.gcode.on_command = homing
+        self.checks()
+        self.phoenix.cmd_DEMO_RECOVER(Command(CONFIRM=1))
+        self.assertEqual(self.phoenix.demo["phase"], "complete")
+        self.assertTrue(any(move[0][:2] == [210., 180.] for move in self.printer.toolhead.moves))
+
+    def test_invalid_saved_park_rejected_before_motion(self):
+        self.phoenix.profile_ready = True
+        self.phoenix.park = [999., 1.]
+        self.cold()
+        with self.assertRaisesRegex(ValueError, "outside travel limits"):
+            self.phoenix.cmd_DEMO(Command())
+        self.assertEqual(self.printer.toolhead.moves, [])
+
+    def test_custom_homing_is_not_executed_or_bypassed(self):
+        self.start()
+        self.checks()
+        self.printer.settings["homing_override"] = {"gcode": "G28"}
+        before = copy.deepcopy(self.printer.toolhead.moves)
+        with self.assertRaisesRegex(ValueError, "Custom homing"):
+            self.phoenix.cmd_DEMO_RECOVER(Command(CONFIRM=1))
+        self.assertEqual(self.printer.gcode.commands, [])
+        self.assertEqual(self.printer.toolhead.moves, before)
+
+    def test_z_homing_during_demo_homing_blocks_return(self):
+        self.start()
+        self.checks()
+        self.printer.gcode.on_command = lambda _: self.phoenix._homing_begin(
+            SimpleNamespace(get_axes=lambda: [2]), [])
+        with self.assertRaisesRegex(ValueError, "must not home Z"):
+            self.phoenix.cmd_DEMO_RECOVER(Command(CONFIRM=1))
+        self.assertEqual(self.phoenix.demo["phase"], "blocked")
+
+    def test_setup_status_tracks_homing_then_saves_current_xy(self):
+        self.printer.toolhead.homed_axes = ""
+        self.assertFalse(self.phoenix.get_status(100.)["setup"]["can_use_current"])
+        self.printer.toolhead.homed_axes = "xyz"
+        self.printer.toolhead.position[:2] = [210., 180.]
+        self.assertTrue(self.phoenix.get_status(101.)["setup"]["can_use_current"])
+        self.phoenix.cmd_SETUP_PROFILE(Command(USE_CURRENT=1, CONFIRM=1))
+        self.assertEqual(self.phoenix.get_status(102.)["setup"]["park"], [210., 180.])
+        self.assertTrue(self.phoenix.get_status(102.)["setup"]["profile_ready"])

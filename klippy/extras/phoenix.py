@@ -15,7 +15,7 @@ import uuid
 from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, digest, file_identity,
                            demo_plan, recovery_plan, verify_file)
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
@@ -120,7 +120,11 @@ class Phoenix:
             self._block("Motors were disabled during recovery; position is no longer trusted.")
 
     def _homing_begin(self, homing_state, rails):
-        if self.demo["phase"] not in ("off", "ready", "complete"):
+        if self.demo["phase"] == "homing":
+            if 2 in homing_state.get_axes():
+                self.demo.update(phase="blocked", error="Demo recovery must not home Z.")
+                raise self.gcode.error(self.demo["error"])
+        elif self.demo["phase"] not in ("off", "ready", "complete"):
             self.demo.update(phase="blocked", error="Homing changed the demo position. Exit and start again.")
         if self.phase in ("preparing", "prepared", "heating", "returning") and 2 in homing_state.get_axes():
             self._block("Z homing is not allowed during Phoenix recovery.")
@@ -183,7 +187,9 @@ class Phoenix:
                    "slicer_confirmed": self.slicer_confirmed}
         atomic_write(self._profile_path(), canonical({"profile": profile, "sha256": digest(profile)}))
 
-    def _setup_status(self):
+    def _setup_status(self, eventtime=None):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
         settings = self._settings()
         compatible_error = None
         try:
@@ -197,7 +203,7 @@ class Phoenix:
                     if re.search(r"^\s*" + command + r"(?:\s|$)", options.get("gcode", ""), re.M):
                         hooks[kind].append(name[12:])
         connected = all(hooks.values()) or self.slicer_confirmed
-        homed = self.toolhead.get_status(self.reactor.monotonic()).get("homed_axes", "")
+        homed = self.toolhead.get_status(eventtime).get("homed_axes", "")
         editable = (self.phase == "idle" and not self.busy and not self.vsd.is_active()
                     and self.demo["phase"] == "off"
                     and self._status("print_stats").get("state") not in ("printing", "paused"))
@@ -318,6 +324,30 @@ class Phoenix:
         return not any(heater.get_status(self.reactor.monotonic()).get("target", 0) > 0
                        for _, heater in self.printer.lookup_objects("heater_generic"))
 
+    def _demo_plan(self):
+        limits = self.toolhead.get_status(self.reactor.monotonic())
+        plan = demo_plan(self.toolhead.get_position(),
+                         (limits["axis_minimum"], limits["axis_maximum"]), self.clearance)
+        if self.profile_ready:
+            for i, value in enumerate(self.park):
+                if not math.isfinite(value) or not limits["axis_minimum"][i] <= value <= limits["axis_maximum"][i]:
+                    raise ValueError("Saved park point is outside travel limits. Update Phoenix setup first.")
+            plan["park"][:2] = self.park
+        return plan
+
+    def _demo_progress(self, phase, message):
+        if self.demo["phase"] == "blocked":
+            raise ValueError(self.demo["error"])
+        self.demo.update(phase=phase, message=message)
+        self.revision += 1
+        for line in ("begin Phoenix demo - no real print", "text " + message, "show"):
+            self.gcode.respond_raw("// action:prompt_" + line)
+
+    def _demo_home_available(self):
+        # Do not bypass machine-specific homing routines, or execute unknown
+        # macros that could heat, probe or home Z during an XY-only demo step.
+        return not any(name in self._settings() for name in ("homing_override", "gcode_macro g28"))
+
     def _demo_guard(self, gcmd, homed=False, cold=True):
         if self.busy:
             raise gcmd.error("Wait for the current demo movement to finish. Emergency stop remains available.")
@@ -350,22 +380,28 @@ class Phoenix:
                 send("text Demo does not run your homing macros because they may enable heaters.")
                 send("button I homed the printer - recheck|PHOENIX_DEMO|primary")
             else:
-                limits = self.toolhead.get_status(self.reactor.monotonic())
-                plan = demo_plan(self.toolhead.get_position(), (limits["axis_minimum"], limits["axis_maximum"]), self.clearance)
+                plan = self._demo_plan()
                 send("text Example interruption point: X=%.1f Y=%.1f Z=%.1f" % tuple(plan["origin"]))
+                send("text %s park: X=%.1f Y=%.1f" % (
+                    "Saved" if self.profile_ready else "Example (finish setup to use your own)", *plan["park"][:2]))
                 send("button Bed and travel path are empty - start demo|_PHOENIX_DEMO_START BED_CLEAR=1 CONFIRM=1|primary")
         elif stage == "interrupted":
             send("text Pretend power was lost here. The actual printer is still powered and its position is known.")
             send("text Saved demo point: X=%.1f Y=%.1f Z=%.1f" % tuple(self.demo["plan"]["origin"]))
+            send("text Next: lift, home X/Y, park, simulate warm-up, signal with the fan, then return. Z is not homed.")
+            if not self._demo_home_available():
+                send("text Custom G28/homing_override detected. Automatic demo homing is unavailable; the machine-specific routine needs review first.")
             for key, label in (("position_ok", "The nozzle is at the shown point; nothing moved"),
                                ("path_clear", "The bed and parking/return path are clear")):
                 checked = self.demo["checks"][key]
                 send("button %s%s|_PHOENIX_DEMO_CHECK ITEM=%s VALUE=%d|%s" %
                      ("[OK] " if checked else "[ ] ", label, key, not checked, "success" if checked else "secondary"))
-            if all(self.demo["checks"].values()):
+            if all(self.demo["checks"].values()) and self._demo_home_available():
                 send("footer_button Simulate recovery|_PHOENIX_DEMO_RECOVER CONFIRM=1|primary")
         elif stage == "complete":
             send("text Demo complete. Returned to the same XYZ point. No heat, extrusion or file resume was performed.")
+            if self.demo.get("fan_warning"):
+                send("text " + self.demo["fan_warning"])
         elif stage == "blocked":
             send("text " + self.demo.get("error", "Exit the demo and check the printer."))
         send("footer_button Finish demo|_PHOENIX_DEMO_EXIT|secondary")
@@ -378,17 +414,21 @@ class Phoenix:
         if gcmd.get_int("BED_CLEAR", 0) != 1 or gcmd.get_int("CONFIRM", 0) != 1:
             raise gcmd.error("Confirm the bed and travel path are empty before starting the demo.")
         self.toolhead.wait_moves()
-        limits = self.toolhead.get_status(self.reactor.monotonic())
-        plan = demo_plan(self.toolhead.get_position(), (limits["axis_minimum"], limits["axis_maximum"]), self.clearance)
+        plan = self._demo_plan()
         self.demo.update(phase="positioning", plan=plan)
         self.busy = True
         try:
+            self._demo_progress("positioning", "Moving to the example interruption point. Heaters remain off.")
             self._demo_move(plan["initial_lift"], self.z_speed)
             self._demo_move(plan["initial_above"], min(self.travel_speed, 30.))
             self._demo_move(plan["origin"], self.z_speed)
             self.demo["phase"] = "interrupted"
         except Exception as exc:
             self.demo.update(phase="blocked", error=str(exc))
+            self.gcode.respond_raw("// action:prompt_begin Phoenix demo stopped")
+            self.gcode.respond_raw("// action:prompt_text " + str(exc))
+            self.gcode.respond_raw("// action:prompt_footer_button Finish demo|_PHOENIX_DEMO_EXIT|secondary")
+            self.gcode.respond_raw("// action:prompt_show")
             raise gcmd.error(str(exc))
         finally:
             self.busy = False
@@ -416,6 +456,8 @@ class Phoenix:
         if self.demo["phase"] != "interrupted" or not all(self.demo["checks"].values()) or gcmd.get_int("CONFIRM", 0) != 1:
             raise gcmd.error("Complete the demo checks before simulating recovery.")
         plan = self.demo["plan"]
+        if not self._demo_home_available():
+            raise gcmd.error("Custom homing needs review before the demo can home X/Y. Exit the demo; do not bypass your printer's homing routine.")
         if any(abs(self.toolhead.get_position()[i] - plan["origin"][i]) > .01 for i in range(3)):
             raise gcmd.error("The demo position changed. Exit the demo and start again.")
         fan = self.printer.lookup_object("fan", None)
@@ -424,31 +466,47 @@ class Phoenix:
         fan_changed = False
         self.busy = True
         try:
-            self.demo["phase"] = "parking"
+            self._demo_progress("lifting", "Lifting for clearance before homing X/Y.")
             self._demo_move(plan["lift"], self.z_speed)
+            self._demo_progress("homing", "Homing X and Y. Z stays at the clearance height.")
+            self.gcode.run_script_from_command("G28 X Y")
+            self.toolhead.wait_moves()
+            if not self._demo_heaters_off():
+                raise ValueError("Homing enabled a heater. Stop the demo and review the homing configuration.")
+            if abs(self.toolhead.get_position()[2] - plan["lift"][2]) > .01:
+                raise ValueError("Homing changed Z. Exit the demo and check the homing configuration.")
+            self._demo_progress("parking", "Moving to park X=%.1f Y=%.1f." % tuple(plan["park"][:2]))
             self._demo_move(plan["park"], min(self.travel_speed, 30.))
-            self.demo["phase"] = "simulating_heat"
+            self._demo_progress("simulating_heat", "Simulating warm-up. No heaters are being turned on.")
             gcmd.respond_info("Demo: pretending to heat. Heaters stay off; the part fan will signal readiness.")
-            self.toolhead.dwell(1.)
+            self.toolhead.dwell(2.)
             self.toolhead.wait_moves()
             if driver and hasattr(driver, "set_speed_from_command"):
+                self._demo_progress("signaling", "Simulated warm-up complete. Part fan: three full-power signals, two seconds each.")
                 for _ in range(3):
                     for value in (1., 0.):
+                        if self.demo["phase"] == "blocked":
+                            raise ValueError(self.demo["error"])
                         fan_changed = True
                         driver.set_speed_from_command(value)
-                        self.toolhead.dwell(.4)
+                        self.toolhead.dwell(2. if value else 1.)
                         self.toolhead.wait_moves()
                 driver.set_speed_from_command(previous_fan)
                 self.toolhead.wait_moves()
                 fan_changed = False
             else:
                 gcmd.respond_info("Demo warm-up complete. No standard part fan is configured for the signal.")
-            self.demo["phase"] = "returning" if self.demo["phase"] != "blocked" else "blocked"
+                self.demo["fan_warning"] = "No standard [fan] found; no fan signal was sent."
+            self._demo_progress("returning", "Returning to the saved interruption point. No extrusion or real print will start.")
             self._demo_move(plan["above_origin"], min(self.travel_speed, 30.))
             self._demo_move(plan["origin"], self.z_speed)
-            self.demo["phase"] = "complete"
+            self.demo.update(phase="complete", message="Demo complete. Returned to the same XYZ; printing would resume here.")
         except Exception as exc:
             self.demo.update(phase="blocked", error=str(exc))
+            self.gcode.respond_raw("// action:prompt_begin Phoenix demo stopped")
+            self.gcode.respond_raw("// action:prompt_text " + str(exc))
+            self.gcode.respond_raw("// action:prompt_footer_button Finish demo|_PHOENIX_DEMO_EXIT|secondary")
+            self.gcode.respond_raw("// action:prompt_show")
             raise gcmd.error(str(exc))
         finally:
             if fan_changed:
@@ -696,6 +754,8 @@ class Phoenix:
                     "z_above_layer": p["z_above_layer"]}
                    for index, p in enumerate(reversed(points))]
         demo = copy.deepcopy(self.demo)
+        demo["home_xy_available"] = self._demo_home_available()
+        demo["park_source"] = "saved_profile" if self.profile_ready else "example"
         demo["homed_axes"] = self.toolhead.get_status(eventtime).get("homed_axes", "")
         demo["heaters_off"] = self._demo_heaters_off()
         demo["can_start"] = (demo["phase"] == "ready" and self.phase == "idle" and not self.busy
@@ -710,7 +770,7 @@ class Phoenix:
                 "file_size": self.job.get("file", {}).get("size") if self.job else None,
                 "reason": self.reason, "error": self.error,
                 "profile_ready": self.profile_ready, "checks": dict(self.checks),
-                "setup": self._setup_status(),
+                "setup": self._setup_status(eventtime),
                 "demo": demo,
                 "selected_index": self.selected, "checkpoints": summary,
                 "assumed_position": points[-1]["machine_position"][:3] if points else None,

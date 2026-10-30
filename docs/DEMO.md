@@ -12,13 +12,18 @@ park profile, source file and print statistics are not modified.
 4. Phoenix moves to that point and pauses as if a print had been interrupted. It
    does not actually cut power or invalidate the printer's known coordinates.
 5. Confirm the shown position and clear park/return route in the demo checklist.
-6. Simulate recovery: lift, park, pretend to heat for one second, pulse the standard
-   part fan three times, restore its prior speed, and return to exactly the same
-   commanded XYZ. No heater, extrusion, homing or file-resume commands are sent.
+6. Simulate recovery: lift, home X/Y with `G28 X Y` (never Z), move to the reviewed
+   park point, pretend to heat for two seconds, pulse the standard part fan three
+   times (full power for two seconds, off for one second), restore its prior speed,
+   and return to exactly the same commanded XYZ. No heater, extrusion or file-resume
+   commands are sent. Custom `homing_override` / `G28` macros block this step until
+   their machine-specific behavior can be reviewed; Phoenix never bypasses them.
 7. Finish demo. The head stays at the demo point; no automatic return-to-home move.
 
 Positions derive from the configured axis minimum/maximum, including negative
-minima and smaller machines. Both initial travel and park/return paths are bounded.
+minima and smaller machines. A reviewed park profile supplies the actual park XY;
+otherwise the preview explicitly labels an example park. Invalid saved coordinates
+are rejected before motion. Both initial travel and park/return paths are bounded.
 Moves use machine coordinates and preserve E. This is for an **empty bed**, not a
 collision analysis of an actual model. If no standard part fan exists, a short
 message substitutes for the readiness pulses.
@@ -35,8 +40,13 @@ power-loss accuracy, journal durability or printing quality.
 
 ## Frontend contract
 
-`phoenix.demo.phase`: off, ready, positioning, interrupted, parking, simulating_heat,
-returning, complete, blocked. `demo.plan`, `demo.checks`, `demo.error` appear as needed.
+`phoenix.demo.phase`: off, ready, positioning, interrupted, lifting, homing, parking,
+simulating_heat, signaling, returning, complete, blocked. `demo.message` describes
+the active step; action prompts are also refreshed before each step. `demo.plan`,
+`demo.checks`, `demo.error` appear as needed. `demo.home_xy_available` indicates
+whether the automatic XY homing step is available. `demo.park_source` is
+`saved_profile` or `example`. Display `demo.fan_warning` if present; do not claim
+that a fan pulse occurred when no standard [fan] was found.
 Always label the native screen DEMO and keep it separate from real recovery.
 
 User entry: `PHOENIX_DEMO`. Internal button commands (not ordinary user actions):

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.1 — 2026-10-30
+
+- Demo uses the reviewed park XY, validates it against travel limits, and labels
+  the generated example park when setup is unfinished.
+- Confirmed demo recovery lifts, homes XY, parks and returns; Z is never homed.
+  Custom G28/homing overrides require review instead of being run or bypassed.
+- Live action-prompt progress and native `demo.message` describe each movement,
+  simulated warm-up, fan signal and return. Failures replace the progress screen.
+- Part-fan signals now run at full power for two seconds each, with one second off.
+  Previous speed is restored; absent standard fans produce a visible notice.
+- Setup status uses the subscription timestamp for homing state. Regression tests
+  verify unhomed → homed → current-XY save; Voyager's mode toggle alone does not save.
+- Native Voyager UI follow-up is documented separately; no Voyager files changed.
+- Host tests pass; printer motion and native UI validation remain pending.
+
 ## 0.3.0 — 2026-10-30
 
 - Setup now checks homing before offering park selection; explicit empty-bed home,
