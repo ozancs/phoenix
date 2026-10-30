@@ -1,0 +1,48 @@
+{
+  "retrieved": "2026-10-31",
+  "sources": [
+    {
+      "repository": "Klipper3d/klipper",
+      "url": "https://github.com/Klipper3d/klipper",
+      "commit": "0cee841e31d701595b3e509a0b502f6e320f52a8",
+      "files": {
+        "klippy/toolhead.py": "1e74edbf1ae0240faaa90c23264577c60d159a3531b39e0653eb889d0c5a602a",
+        "klippy/extras/motion_report.py": "845a759b4173177413e8c654b14b3dd03670ebe714baf082c15250bf7e2d312d",
+        "klippy/extras/virtual_sdcard.py": "0c257625cc4ef3bd3033dab01aa29a159cc6864701bd967fcaf125f09608476f",
+        "klippy/extras/print_stats.py": "60666c9020aabb1b60abc3bef587037d907965d16bbfcc4377d02626dcf2489f",
+        "klippy/clocksync.py": "a5b9e700e6c225e1067deb0be11adf9307a872c79652273002c2f49116e1594d",
+        "klippy/kinematics/corexy.py": "d95b2679e105293fb05dd983bedf25ccbb062b7c53dfffe4f60a28afe5f0b206",
+        "klippy/kinematics/extruder.py": "5f6a553bfad38e896f27e47a02197c665a702dcdafe6a5f23f645589b3066e5a",
+        "klippy/chelper/kin_extruder.c": "c9f24b00fd117d664ed257cd3b663d1e6a08568b4a4643963beeea19e63cbd67",
+        "klippy/chelper/trapq.c": "9ec6351cc5fc4f4e8cc0a49885d334195016a7838d1ee088b4a9f744d45f07f9",
+        "src/stepper.c": "3a2f9d8f3785264136eda92d8da016492aedc7e4e65078a8eb8507449e1cddcf"
+      }
+    },
+    {
+      "repository": "Yumi-Lab/YUMI_PLR",
+      "url": "https://github.com/Yumi-Lab/YUMI_PLR",
+      "commit": "c0ccb2459e4d76acbb1037c59674569f313e105d",
+      "files": {
+        "plr.cfg": "22099214389ff5b1a3603a38e7521b9e98a55febd602694382e4293bbc26ad67",
+        "plr.sh": "807184254ff8e576f0943f173b4902b4f50ad9610f442026a93fc6411b2e50a0"
+      }
+    },
+    {
+      "repository": "ankurv2k6/klipper-plr",
+      "url": "https://github.com/ankurv2k6/klipper-plr",
+      "commit": "05fc1fedf2a3f500bb8dcc1e0ed767250c5d2cd2",
+      "files": {
+        "power_loss_recovery.py": "33bcdd372ed9c7fd160bf6ed3b2f4a731c060959b1358404fbbfba0faca8394e"
+      }
+    },
+    {
+      "repository": "mikeoverbay/klipper-power-loss-recovery",
+      "url": "https://github.com/mikeoverbay/klipper-power-loss-recovery",
+      "commit": "4f6c2b457d134962522d726b1d754be703953288",
+      "files": {
+        "klippy/extras/lost_z.py": "87dd3f6fa2bc384639a70c8bc700e49de3ba494fd48048ff27f624d4cf23737d",
+        "klippy/extras/lost_z_make_resume.py": "d6877f8bc4fb4d50944bdfe3be755a9eedafc5853888b1a444d74167f597e618"
+      }
+    }
+  ]
+}

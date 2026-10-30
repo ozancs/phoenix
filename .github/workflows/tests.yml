@@ -17,3 +17,25 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: node --test tests/test_client.mjs
       - run: bash -n scripts/install.sh scripts/uninstall.sh
+  simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/checkout@v4
+        with:
+          repository: Klipper3d/klipper
+          ref: 0cee841e31d701595b3e509a0b502f6e320f52a8
+          path: runtime/klipper
+      - uses: actions/checkout@v4
+        with:
+          repository: mikeoverbay/klipper-power-loss-recovery
+          ref: 4f6c2b457d134962522d726b1d754be703953288
+          path: runtime/competitor
+      - run: python -m research.simulate --klipper runtime/klipper --competitor runtime/competitor --cases 6600 --output runtime/results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simulation-results
+          path: runtime/results

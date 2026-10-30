@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 — 2026-10-31
+
+- Adds bounded read-only trapq evidence capture, session identity and explicit
+  unavailable/pruned metadata; updates evidence at unchanged SD offsets.
+- Adds acceleration-aware trajectory envelopes, multiple segment candidates,
+  strict offline linear G-code indexing and evidence-based confidence classes.
+- PHOENIX_ANALYZE and status.analysis expose uncertainty and validation failures;
+  unknown physical position/bounds remain null. Real recovery motion is unchanged.
+- Adds pinned upstream lookahead simulation (6,600 interruptions), inverse-homing
+  sensitivity experiments (2,800), actual competitor matcher comparison and CI.
+- Adds fault-injection/regression tests, source provenance, research report and
+  separate hardware validation checklist. No physical/virtual-MCU success claim.
+- Existing journals, two-module install/update paths and custom-homing demo retained.
+
 ## 0.3.2 — 2026-10-30
 
 - Custom homing no longer leaves the demo without a Continue action. KEEP uses

@@ -13,9 +13,10 @@ import time
 import uuid
 
 from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, digest, file_identity,
-                           demo_plan, recovery_plan, verify_file)
+                           demo_plan, recovery_plan, verify_file, capture_motion_evidence,
+                           assess_evidence)
 
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
@@ -62,13 +63,16 @@ class Phoenix:
         self.revision = 0
         self.busy = False
         self.demo = {"phase": "off"}
+        self.session_id = uuid.uuid4().hex
+        self.validation_issue = None
         self.journal = self.writer = None
         for name in ("START", "END", "STATUS", "SELECT", "CHECK", "PREPARE",
                      "RESUME", "DISCARD", "PROMPT", "LAYER", "SETUP",
-                     "SETUP_PROFILE", "SETUP_SLICER", "DEMO"):
+                     "SETUP_PROFILE", "SETUP_SLICER", "DEMO", "ANALYZE"):
             self.gcode.register_command("PHOENIX_" + name, getattr(self, "cmd_" + name),
                                         desc={"SETUP": "Set up Phoenix or change the park point",
                                               "STATUS": "Show Phoenix recording and recovery status",
+                                              "ANALYZE": "Explain recovery evidence and uncertainty without moving",
                                               "DEMO": "Try recovery on an empty bed, without heating or extrusion",
                                               "START": "Automatic print-start hook; not a manual action",
                                               "END": "Automatic print-end hook; not a manual action"}.get(name))
@@ -622,6 +626,8 @@ class Phoenix:
         if retract and getattr(retract, "is_retracted", False):
             # Do not record a hidden retract state; existing checkpoints remain usable.
             return None
+        evidence = capture_motion_evidence(self.printer, self.reactor.monotonic())
+        evidence["session_id"] = self.session_id
         return {
             "id": uuid.uuid4().hex[:12], "saved_at": time.time(),
             "offset": self.vsd.file_position, "machine_position": machine,
@@ -630,6 +636,7 @@ class Phoenix:
             "z_above_layer": (None if self.layer_z is None else
                               self.move.get_status()["gcode_position"][2] - self.layer_z),
             "position_kind": "commanded_not_measured", "mesh": self._mesh(),
+            "motion_evidence": evidence,
             "extruder_target": extruder.get("target", 0.),
             "bed_target": self._status("heater_bed").get("target", 0.),
             "fans": fans,
@@ -669,7 +676,16 @@ class Phoenix:
                         snapshot["offset"] != self.job["checkpoints"][-1]["offset"]):
                     self.job["checkpoints"].append(snapshot)
                     self.job["checkpoints"] = self.job["checkpoints"][-self.history_size:]
-                    self.writer.submit(self.job)
+                else:
+                    # Stationary SD offset does not mean stationary MCU time.
+                    self.job["checkpoints"][-1] = snapshot
+                # Keep the bounded raw trapq tail only on the newest checkpoint.
+                # Older state checkpoints retain capture metadata, not repeated C queues.
+                for older in self.job["checkpoints"][:-1]:
+                    old_motion = older.get("motion_evidence", {})
+                    if old_motion.pop("tracks", None) is not None:
+                        old_motion["tracks_pruned"] = True
+                self.writer.submit(self.job)
         except Exception as exc:
             logging.exception("Phoenix checkpoint failed")
             self._block(str(exc))
@@ -681,6 +697,7 @@ class Phoenix:
         self.journal.terminal(phase)
         self.journal.clear_fence()
         self.phase, self.job = "idle", None
+        self.validation_issue = None
         self._event(phase)
 
     def _require(self, gcmd, phases):
@@ -787,6 +804,7 @@ class Phoenix:
                 "profile_ready": self.profile_ready, "checks": dict(self.checks),
                 "setup": self._setup_status(eventtime),
                 "demo": demo,
+                "analysis": self._analysis(),
                 "selected_index": self.selected, "checkpoints": summary,
                 "assumed_position": points[-1]["machine_position"][:3] if points else None,
                 "plan": copy.deepcopy(self.plan),
@@ -796,6 +814,35 @@ class Phoenix:
                 "capabilities": {"z_homing": False, "z_hop": True,
                                  "checkpoint_selection": True, "arbitrary_line_selection": False,
                                  "automatic_resume": False}}
+
+    def _analysis(self):
+        points = self.job.get("checkpoints", []) if self.job else []
+        latest = points[-1] if points else None
+        motion = latest.get("motion_evidence", {}) if latest else {}
+        decision = assess_evidence({"no_valid_checkpoint": self.phase in ("detected", "blocked") and not points,
+                                    "storage_failed": bool(self.writer and self.writer.error),
+                                    "state_unsupported": self.phase == "blocked" or bool(self.validation_issue)})
+        return {"schema": 1, "confidence": decision, "applicable": bool(points) or self.phase == "blocked",
+                "last_checkpoint": ({"id": latest["id"], "saved_at": latest["saved_at"],
+                                     "offset": latest["offset"]} if latest else None),
+                "assumed_position": latest["machine_position"] if latest else None,
+                "estimated_stop_position": None, "physical_error_bounds_mm": None,
+                "stop_time_known": False,
+                "motion_recorded": bool(motion.get("tracks")),
+                "motion_capture_error": motion.get("unavailable"),
+                "validation_error": self.validation_issue,
+                "candidate_resume_offset": points[-1-self.selected]["offset"] if points else None,
+                "summary": ("No interrupted-print evidence." if not latest else
+                            "Checkpoint position is commanded, not measured. The outage time and physical error bounds are unknown. Manual verification is required."),
+                "risks": ["queued_motion", "unrecorded_tail", "unmeasured_axis_motion",
+                          "z_hop", "pressure_advance_and_nozzle_pressure", "replayed_or_missing_extrusion"]}
+
+    def cmd_ANALYZE(self, gcmd):
+        analysis = self._analysis()
+        if gcmd.get_int("DETAILS", 0):
+            gcmd.respond_info(json.dumps(analysis, indent=2))
+        else:
+            gcmd.respond_info("Phoenix: %s. %s" % (analysis["confidence"]["class"], analysis["summary"]))
 
     def cmd_STATUS(self, gcmd):
         if gcmd.get_int("DETAILS", 0):
@@ -836,7 +883,17 @@ class Phoenix:
             self.cmd_PROMPT(gcmd)
 
     def _validate_recovery(self):
+        self.validation_issue = None
+        try:
+            self._validate_recovery_state()
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            self.validation_issue = str(exc)
+            raise
+
+    def _validate_recovery_state(self):
         self._compatible()
+        if self._analysis()["confidence"]["class"] == "unsafe":
+            raise ValueError("Recovery evidence is unsafe. Inspect PHOENIX_ANALYZE before continuing.")
         if self.vsd.is_active() or self._status("print_stats").get("state") == "paused":
             raise ValueError("Another print is active or paused")
         if self._config_hash() != self.job["config_hash"]:
@@ -1018,6 +1075,10 @@ class Phoenix:
         if self.phase == "detected":
             send("text Interrupted print detected. Power loss or restart may be the cause.")
             send("text No Z homing. Saved positions are estimates; Z-hop and queued moves may differ.")
+            analysis = self._analysis()
+            send("text Recovery confidence: " + analysis["confidence"]["class"] + ". Physical position error is unknown; no automatic resume.")
+            if analysis["validation_error"]:
+                send("text " + analysis["validation_error"])
             for key in CHECKS:
                 mark = "[OK] " if self.checks[key] else "[ ] "
                 # Prompt buttons use a single registered command; REFRESH is optional.

@@ -6,7 +6,7 @@ Phoenix records recent print states and helps an operator prepare, inspect and r
 an interrupted Klipper virtual-SD print. It works through ordinary G-code commands
 in Mainsail and Fluidd, with a versioned status interface for a native Voyager experience.
 
-**0.3.2 is experimental, not a hardware-validated release.**
+**0.4.0 is experimental, not a hardware-validated release.**
 Host-side tests pass; real printer validation is still required. A GitHub repository is available; no real printer validation has been performed here.
 
 ## Design decisions
@@ -212,3 +212,20 @@ Integration references: [Klipper virtual SD](https://github.com/Klipper3d/klippe
 [coordinate systems](https://www.klipper3d.org/Code_Overview.html#coordinate-systems).
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+## Timing analysis research prototype (0.4.0)
+
+Phoenix now records a bounded scheduled-motion tail where the installed Klipper
+API supports it. It does not treat that tail as measured physical position.
+`PHOENIX_ANALYZE` explains evidence and uncertainty without moving the printer.
+Existing recovery, demo, setup and installer paths remain available; old journals
+load without migration. Updating the two existing linked modules is sufficient.
+
+[Research report (Turkish)](docs/RESEARCH-REPORT.tr.md),
+[reproduce 6,600 interruption and 2,800 homing experiments](research/README.md),
+[supervised hardware validation](docs/HARDWARE-VALIDATION.md).
+
+The offline estimator uses real Klipper lookahead classes and preserves ambiguous
+segment matches. Exact live mid-segment resumption is not implemented. The live
+software-only adapter cannot establish the outage time or physical error bound,
+so it requires manual verification and never automatically resumes.
