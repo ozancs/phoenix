@@ -15,7 +15,7 @@ import uuid
 from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, digest, file_identity,
                            demo_plan, recovery_plan, verify_file)
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
@@ -388,18 +388,22 @@ class Phoenix:
         elif stage == "interrupted":
             send("text Pretend power was lost here. The actual printer is still powered and its position is known.")
             send("text Saved demo point: X=%.1f Y=%.1f Z=%.1f" % tuple(self.demo["plan"]["origin"]))
-            send("text Next: lift, home X/Y, park, simulate warm-up, signal with the fan, then return. Z is not homed.")
+            send("text Next: lift, park, simulate warm-up, signal with the fan, then return. Z is not homed.")
             if not self._demo_home_available():
-                send("text Custom G28/homing_override detected. Automatic demo homing is unavailable; the machine-specific routine needs review first.")
+                send("text Your printer uses custom homing. Demo can keep the existing home position because no power or position was actually lost. Your homing routine will not be changed or run.")
             for key, label in (("position_ok", "The nozzle is at the shown point; nothing moved"),
                                ("path_clear", "The bed and parking/return path are clear")):
                 checked = self.demo["checks"][key]
                 send("button %s%s|_PHOENIX_DEMO_CHECK ITEM=%s VALUE=%d|%s" %
                      ("[OK] " if checked else "[ ] ", label, key, not checked, "success" if checked else "secondary"))
-            if all(self.demo["checks"].values()) and self._demo_home_available():
-                send("footer_button Simulate recovery|_PHOENIX_DEMO_RECOVER CONFIRM=1|primary")
+            if all(self.demo["checks"].values()):
+                if self._demo_home_available():
+                    send("button Home X/Y and continue|_PHOENIX_DEMO_RECOVER CONFIRM=1 HOME_MODE=XY|primary")
+                send("footer_button Continue using current home position|_PHOENIX_DEMO_RECOVER CONFIRM=1 HOME_MODE=KEEP|primary")
         elif stage == "complete":
             send("text Demo complete. Returned to the same XYZ point. No heat, extrusion or file resume was performed.")
+            if self.demo.get("home_mode") == "keep":
+                send("text Existing home position was used; no homing command was sent. This demo did not test re-homing after a real power loss.")
             if self.demo.get("fan_warning"):
                 send("text " + self.demo["fan_warning"])
         elif stage == "blocked":
@@ -456,25 +460,35 @@ class Phoenix:
         if self.demo["phase"] != "interrupted" or not all(self.demo["checks"].values()) or gcmd.get_int("CONFIRM", 0) != 1:
             raise gcmd.error("Complete the demo checks before simulating recovery.")
         plan = self.demo["plan"]
-        if not self._demo_home_available():
-            raise gcmd.error("Custom homing needs review before the demo can home X/Y. Exit the demo; do not bypass your printer's homing routine.")
+        # Legacy/native clients without HOME_MODE must also have a usable route.
+        mode = gcmd.get("HOME_MODE", "XY" if self._demo_home_available() else "KEEP").upper()
+        if mode not in ("KEEP", "XY"):
+            raise gcmd.error("Choose KEEP (existing home position) or XY (home X/Y).")
+        if mode == "XY" and not self._demo_home_available():
+            raise gcmd.error("Use HOME_MODE=KEEP for this demo. Your custom homing routine will not be run or bypassed.")
         if any(abs(self.toolhead.get_position()[i] - plan["origin"][i]) > .01 for i in range(3)):
             raise gcmd.error("The demo position changed. Exit the demo and start again.")
         fan = self.printer.lookup_object("fan", None)
         driver = getattr(fan, "fan", None)
         previous_fan = self._status("fan").get("speed", 0.)
         fan_changed = False
+        self.demo["home_mode"] = mode.lower()
         self.busy = True
         try:
-            self._demo_progress("lifting", "Lifting for clearance before homing X/Y.")
+            self._demo_progress("lifting", "Lifting for clearance.")
             self._demo_move(plan["lift"], self.z_speed)
-            self._demo_progress("homing", "Homing X and Y. Z stays at the clearance height.")
-            self.gcode.run_script_from_command("G28 X Y")
-            self.toolhead.wait_moves()
-            if not self._demo_heaters_off():
-                raise ValueError("Homing enabled a heater. Stop the demo and review the homing configuration.")
-            if abs(self.toolhead.get_position()[2] - plan["lift"][2]) > .01:
-                raise ValueError("Homing changed Z. Exit the demo and check the homing configuration.")
+            if mode == "XY":
+                self._demo_progress("homing", "Homing X and Y. Z stays at the clearance height.")
+                self.gcode.run_script_from_command("G28 X Y")
+                self.toolhead.wait_moves()
+                if not self._demo_heaters_off():
+                    raise ValueError("Homing enabled a heater. Stop the demo and review the homing configuration.")
+                if abs(self.toolhead.get_position()[2] - plan["lift"][2]) > .01:
+                    raise ValueError("Homing changed Z. Exit the demo and check the homing configuration.")
+            else:
+                self._demo_progress("keeping_position", "Using the existing home position. No homing command is sent in this demo path.")
+                self.toolhead.dwell(1.)
+                self.toolhead.wait_moves()
             self._demo_progress("parking", "Moving to park X=%.1f Y=%.1f." % tuple(plan["park"][:2]))
             self._demo_move(plan["park"], min(self.travel_speed, 30.))
             self._demo_progress("simulating_heat", "Simulating warm-up. No heaters are being turned on.")
@@ -755,6 +769,7 @@ class Phoenix:
                    for index, p in enumerate(reversed(points))]
         demo = copy.deepcopy(self.demo)
         demo["home_xy_available"] = self._demo_home_available()
+        demo["home_modes"] = ["keep", "xy"] if demo["home_xy_available"] else ["keep"]
         demo["park_source"] = "saved_profile" if self.profile_ready else "example"
         demo["homed_axes"] = self.toolhead.get_status(eventtime).get("homed_axes", "")
         demo["heaters_off"] = self._demo_heaters_off()

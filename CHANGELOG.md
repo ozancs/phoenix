@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 — 2026-10-30
+
+- Custom homing no longer leaves the demo without a Continue action. KEEP uses
+  the existing valid home position; no homing macros are executed or bypassed.
+- Standard homing retains the explicit XY option. Legacy demo commands choose
+  KEEP automatically when custom homing is detected.
+- UI status exposes available/chosen home modes and a keeping-position message.
+  Completion explains that KEEP does not test real power-loss re-homing.
+- Homing/position/checklist guards remain enforced; real recovery is unchanged.
+
 ## 0.3.1 — 2026-10-30
 
 - Demo uses the reviewed park XY, validates it against travel limits, and labels

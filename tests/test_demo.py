@@ -174,15 +174,45 @@ class DemoTests(unittest.TestCase):
             self.phoenix.cmd_DEMO(Command())
         self.assertEqual(self.printer.toolhead.moves, [])
 
-    def test_custom_homing_is_not_executed_or_bypassed(self):
+    def test_custom_homing_defaults_to_existing_position_and_completes(self):
         self.start()
         self.checks()
         self.printer.settings["homing_override"] = {"gcode": "G28"}
-        before = copy.deepcopy(self.printer.toolhead.moves)
-        with self.assertRaisesRegex(ValueError, "Custom homing"):
-            self.phoenix.cmd_DEMO_RECOVER(Command(CONFIRM=1))
+        self.phoenix.cmd_DEMO(Command())
+        self.assertTrue(any("Continue using current home" in line for line in self.printer.gcode.lines))
+        self.phoenix.cmd_DEMO_RECOVER(Command(CONFIRM=1))
         self.assertEqual(self.printer.gcode.commands, [])
+        self.assertEqual(self.phoenix.demo["phase"], "complete")
+        self.assertEqual(self.phoenix.demo["home_mode"], "keep")
+        self.assertEqual(self.printer.toolhead.position[:3], self.phoenix.demo["plan"]["origin"])
+
+    def test_keep_position_option_works_without_custom_homing(self):
+        self.start()
+        self.checks()
+        self.phoenix.cmd_DEMO_RECOVER(Command(CONFIRM=1, HOME_MODE="KEEP"))
+        self.assertEqual(self.printer.gcode.commands, [])
+        self.assertEqual(self.phoenix.demo["phase"], "complete")
+
+    def test_custom_homing_explicit_xy_rejected_without_motion(self):
+        self.start()
+        self.checks()
+        self.printer.settings["gcode_macro g28"] = {"gcode": "G28.1"}
+        before = copy.deepcopy(self.printer.toolhead.moves)
+        with self.assertRaisesRegex(ValueError, "HOME_MODE=KEEP"):
+            self.phoenix.cmd_DEMO_RECOVER(Command(CONFIRM=1, HOME_MODE="XY"))
         self.assertEqual(self.printer.toolhead.moves, before)
+        self.assertEqual(self.printer.gcode.commands, [])
+
+    def test_keep_mode_cannot_bypass_missing_home_or_moved_position(self):
+        self.start()
+        self.checks()
+        self.printer.toolhead.homed_axes = "xy"
+        with self.assertRaisesRegex(ValueError, "Home the printer"):
+            self.phoenix.cmd_DEMO_RECOVER(Command(CONFIRM=1, HOME_MODE="KEEP"))
+        self.printer.toolhead.homed_axes = "xyz"
+        self.printer.toolhead.position[0] += 1
+        with self.assertRaisesRegex(ValueError, "position changed"):
+            self.phoenix.cmd_DEMO_RECOVER(Command(CONFIRM=1, HOME_MODE="KEEP"))
 
     def test_z_homing_during_demo_homing_blocks_return(self):
         self.start()
