@@ -420,6 +420,54 @@ class AdapterTests(unittest.TestCase):
         self.printer.settings["gcode_macro PRINT_START"] = {"gcode": "PHOENIX_START"}
         self.printer.settings["gcode_macro PRINT_END"] = {"gcode": "PHOENIX_END"}
 
+    def test_new_print_replaces_pending_recovery_without_motion(self):
+        p = self.interrupted()
+        p.selected, p.plan = 1, {"old": True}
+        self.printer.sd.from_sd = True
+        p.cmd_START(Command())
+        self.assertEqual(p.phase, "recording")
+        self.assertNotEqual(p.job["id"], "job1")
+        self.assertEqual(p.selected, 0)
+        self.assertIsNone(p.plan)
+        self.assertFalse(any(p.checks.values()))
+        self.assertEqual(p.journal.load()["id"], p.job["id"])
+        self.assertEqual(self.printer.toolhead.moves, [])
+        self.assertEqual(self.printer.gcode.commands, [])
+        self.assertIn("// action:prompt_end", self.printer.gcode.lines)
+
+    def test_fresh_print_replaces_blocked_recovery_fence(self):
+        p = self.interrupted()
+        p.phase, p.error = "blocked", "Previous recovery interrupted"
+        p.journal.fence_motion()
+        self.printer.sd.from_sd = True
+        p.cmd_START(Command())
+        self.assertEqual(p.phase, "recording")
+        self.assertFalse(p.journal.fence.exists())
+        self.assertIsNone(p.error)
+
+    def test_console_start_cannot_discard_pending_recovery(self):
+        p = self.interrupted()
+        with self.assertRaisesRegex(ValueError, "virtual-SD"):
+            p.cmd_START(Command())
+        self.assertEqual(p.job["id"], "job1")
+        self.assertEqual(p.journal.load()["id"], "job1")
+
+    def test_same_open_file_after_error_is_not_a_fresh_print(self):
+        p = self.interrupted()
+        p.active_file = self.printer.sd.current_file
+        self.printer.sd.from_sd = True
+        with self.assertRaises(ValueError):
+            p.cmd_START(Command())
+        self.assertEqual(p.job["id"], "job1")
+
+    def test_invalid_new_print_preserves_previous_recovery(self):
+        p = self.interrupted()
+        self.printer.sd.from_sd = True
+        self.printer.settings["printer"]["kinematics"] = "delta"
+        with self.assertRaises(ValueError):
+            p.cmd_START(Command())
+        self.assertEqual(p.journal.load()["id"], "job1")
+
     def test_unhomed_setup_shows_home_before_any_save_or_jog(self):
         self.setup_hooks()
         p = self.phoenix

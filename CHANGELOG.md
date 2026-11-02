@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1 — 2026-11-02
+
+- A fresh virtual-SD print automatically supersedes pending/prepared/blocked
+  recovery instead of failing at the end of PRINT_START after the prime line.
+- Reopening the same filename counts as a new print; duplicate hooks in the same
+  open file remain idempotent. Console-only START cannot discard an old recovery.
+- Validate the new file/config first, replace journal generations and clear old
+  selection/checklist/plan/fence state before recording the new job.
+- Close the fallback recovery prompt and publish the new recording state.
+- Regression tests cover pending/blocked recovery, invalid replacement, console
+  commands and same-open-file error states. No hardware commands were executed.
+
 ## 0.4.0 — 2026-10-31
 
 - Adds bounded read-only trapq evidence capture, session identity and explicit

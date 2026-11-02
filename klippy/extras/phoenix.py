@@ -16,7 +16,7 @@ from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, dige
                            demo_plan, recovery_plan, verify_file, capture_motion_evidence,
                            assess_evidence)
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
@@ -735,22 +735,27 @@ class Phoenix:
             raise ValueError("Enable [force_move] enable_force_move: True for explicit recovery")
 
     def cmd_START(self, gcmd):
-        if self.active and self.vsd.is_cmd_from_sd():
-            # Existing slicer hooks may coexist with newly installed macro hooks.
-            current = getattr(self.vsd, "current_file", None)
-            if current is not None and current is self.active_file:
-                return
-            # A freshly opened virtual-SD file must never inherit the previous job.
-            try:
-                self._finish("replaced")
-            except Exception as exc:
-                raise gcmd.error(str(exc))
-        self._require(gcmd, ("idle",))
         if not self.vsd.is_cmd_from_sd() or not self.vsd.file_path():
             raise gcmd.error("PHOENIX_START must run inside a virtual-SD print")
+        if self.busy or self.demo["phase"] != "off":
+            self._require(gcmd, ("idle",))
+        current = getattr(self.vsd, "current_file", None)
+        # A second hook in the same open print is not a new print, even when
+        # the slicer and PRINT_START both contain PHOENIX_START.
+        if self.active and current is not None and current is self.active_file:
+            return
+        fresh_file = current is not None and current is not self.active_file
+        replace_recovery = (fresh_file and self.writer is not None
+                            and self.phase in ("recording", "detected", "prepared", "blocked"))
+        if not replace_recovery:
+            self._require(gcmd, ("idle",))
         try:
             self._compatible()
             identity = file_identity(self.vsd.file_path(), self.vsd.sdcard_dirname)
+            # Starting a newly opened SD print explicitly abandons old recovery,
+            # including restarting the same filename. Validate before discarding.
+            if replace_recovery:
+                self._finish("replaced")
             self.job = {"id": uuid.uuid4().hex, "phase": "recording", "file": identity,
                         "config_hash": self._config_hash(), "checkpoints": [],
                         "started_at": time.time(), "version": VERSION}
@@ -762,7 +767,13 @@ class Phoenix:
             self.active, self.phase, self.layer_z = True, "recording", None
             self.active_file = getattr(self.vsd, "current_file", None)
             self.error = None
+            self.validation_issue, self.reason = None, ""
+            self.selected, self.plan = 0, None
+            self.checks = {key: False for key in CHECKS}
             self._event("recording_started")
+            if replace_recovery:
+                self.gcode.respond_raw("// action:prompt_end")
+                gcmd.respond_info("New print started. Previous Phoenix recovery was discarded automatically.")
         except Exception as exc:
             raise gcmd.error(str(exc))
 

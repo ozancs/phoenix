@@ -6,7 +6,7 @@ Phoenix records recent print states and helps an operator prepare, inspect and r
 an interrupted Klipper virtual-SD print. It works through ordinary G-code commands
 in Mainsail and Fluidd, with a versioned status interface for a native Voyager experience.
 
-**0.4.0 is experimental, not a hardware-validated release.**
+**0.4.1 is experimental, not a hardware-validated release.**
 Host-side tests pass; real printer validation is still required. A GitHub repository is available; no real printer validation has been performed here.
 
 ## Design decisions
@@ -229,3 +229,7 @@ The offline estimator uses real Klipper lookahead classes and preserves ambiguou
 segment matches. Exact live mid-segment resumption is not implemented. The live
 software-only adapter cannot establish the outage time or physical error bound,
 so it requires manual verification and never automatically resumes.
+
+Starting a fresh virtual-SD print automatically abandons the previous Phoenix
+recovery, including a fresh start of the same filename. No manual DISCARD is needed.
+Repeated start hooks within the same open print do not reset its checkpoints.
