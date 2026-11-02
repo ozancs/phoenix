@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.2 — 2026-11-02
+
+- PHOENIX_START offloads G-code hashing, writer drain, replacement tombstones,
+  journal fsync/replace and fence clearing to a disk worker. Klipper waits using
+  reactor completion instead of blocking its event loop on disk operations.
+- Pause the checkpoint producer while starting; publish recording only after both
+  generations are durable. Preserve automatic replacement and duplicate-hook rules.
+- Reject activation after shutdown or source-file replacement during the wait.
+  I/O failures remain visible and do not falsely enable recovery recording.
+- Log per-stage startup times and expose status.startup_timing. These are wall
+  durations, not reactor-stall measurements or proof of a specific TTC cause.
+- Added threading/lifecycle regression tests with blocked disk work. No printer
+  settings were changed and no hardware Timer too close reproduction was performed.
+
 ## 0.4.1 — 2026-11-02
 
 - A fresh virtual-SD print automatically supersedes pending/prepared/blocked

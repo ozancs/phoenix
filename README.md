@@ -6,7 +6,7 @@ Phoenix records recent print states and helps an operator prepare, inspect and r
 an interrupted Klipper virtual-SD print. It works through ordinary G-code commands
 in Mainsail and Fluidd, with a versioned status interface for a native Voyager experience.
 
-**0.4.1 is experimental, not a hardware-validated release.**
+**0.4.2 is experimental, not a hardware-validated release.**
 Host-side tests pass; real printer validation is still required. A GitHub repository is available; no real printer validation has been performed here.
 
 ## Design decisions
@@ -233,3 +233,10 @@ so it requires manual verification and never automatically resumes.
 Starting a fresh virtual-SD print automatically abandons the previous Phoenix
 recovery, including a fresh start of the same filename. No manual DISCARD is needed.
 Repeated start hooks within the same open print do not reset its checkpoints.
+
+Since 0.4.2, PHOENIX_START performs file hashing and initial durable journal writes
+on a disk worker, waiting through Klipper's cooperative reactor completion. The
+G-code stream waits until recording is durable; the reactor remains available.
+`Phoenix startup timing:` in klippy.log and `phoenix.startup_timing` report per-stage
+wall times. These are not measurements of reactor stalls or proof of a Timer too
+close root cause. Apply updates/restart only when the printer is idle.

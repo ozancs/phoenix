@@ -12,11 +12,11 @@ import re
 import time
 import uuid
 
-from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, digest, file_identity,
+from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, digest,
                            demo_plan, recovery_plan, verify_file, capture_motion_evidence,
-                           assess_evidence)
+                           assess_evidence, run_disk_task, initialize_recording)
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
@@ -65,6 +65,8 @@ class Phoenix:
         self.demo = {"phase": "off"}
         self.session_id = uuid.uuid4().hex
         self.validation_issue = None
+        self.startup_timing = None
+        self.shutdown_seen = False
         self.journal = self.writer = None
         for name in ("START", "END", "STATUS", "SELECT", "CHECK", "PREPARE",
                      "RESUME", "DISCARD", "PROMPT", "LAYER", "SETUP",
@@ -116,6 +118,7 @@ class Phoenix:
 
     def _shutdown(self):
         self.active = False
+        self.shutdown_seen = True
 
     def _motor_off(self, *args):
         if self.demo["phase"] not in ("off", "ready", "complete"):
@@ -751,21 +754,28 @@ class Phoenix:
             self._require(gcmd, ("idle",))
         try:
             self._compatible()
-            identity = file_identity(self.vsd.file_path(), self.vsd.sdcard_dirname)
-            # Starting a newly opened SD print explicitly abandons old recovery,
-            # including restarting the same filename. Validate before discarding.
-            if replace_recovery:
-                self._finish("replaced")
-            self.job = {"id": uuid.uuid4().hex, "phase": "recording", "file": identity,
-                        "config_hash": self._config_hash(), "checkpoints": [],
-                        "started_at": time.time(), "version": VERSION}
-            self.writer.flush()
-            # Replace both slots so fallback cannot select a previous job.
-            self.journal.save(self.job)
-            self.journal.save(self.job)
-            self.journal.clear_fence()
+            # Copy all Klipper-owned state before yielding. The worker sees no APIs.
+            path, root = self.vsd.file_path(), self.vsd.sdcard_dirname
+            settings = copy.deepcopy(self._settings())
+        except Exception as exc:
+            raise gcmd.error(str(exc))
+        metadata = {"id": uuid.uuid4().hex, "phase": "recording", "checkpoints": [],
+                    "started_at": time.time(), "version": VERSION}
+        self.active, self.busy, self.phase = False, True, "starting"
+        self._event("recording_initializing")
+        timings = {"replaced_recovery": replace_recovery}
+        started = time.monotonic()
+        logging.info("Phoenix startup begin: version=%s replace=%s", VERSION, replace_recovery)
+        try:
+            job = run_disk_task(self.reactor, lambda: initialize_recording(
+                self.writer, self.journal, path, root, metadata, settings, replace_recovery, timings))
+            if self.shutdown_seen:
+                raise ValueError("Printer shut down while Phoenix initialized; recording was not activated")
+            if getattr(self.vsd, "current_file", None) is not current:
+                raise ValueError("Print file changed while Phoenix initialized; recording was not activated")
+            self.job = job
             self.active, self.phase, self.layer_z = True, "recording", None
-            self.active_file = getattr(self.vsd, "current_file", None)
+            self.active_file = current
             self.error = None
             self.validation_issue, self.reason = None, ""
             self.selected, self.plan = 0, None
@@ -775,7 +785,16 @@ class Phoenix:
                 self.gcode.respond_raw("// action:prompt_end")
                 gcmd.respond_info("New print started. Previous Phoenix recovery was discarded automatically.")
         except Exception as exc:
+            # Do not submit the old job over the worker's partially completed
+            # transaction. Existing journal/fence logic handles restart recovery.
+            self.active, self.phase, self.error = False, "blocked", str(exc)
+            timings["error"] = str(exc)
             raise gcmd.error(str(exc))
+        finally:
+            self.busy = False
+            timings["total_ms"] = round((time.monotonic()-started)*1000., 3)
+            self.startup_timing = dict(timings)
+            logging.info("Phoenix startup timing: %s", json.dumps(timings, sort_keys=True))
 
     def cmd_END(self, gcmd):
         if self.active:
@@ -816,6 +835,7 @@ class Phoenix:
                 "setup": self._setup_status(eventtime),
                 "demo": demo,
                 "analysis": self._analysis(),
+                "startup_timing": copy.deepcopy(self.startup_timing),
                 "selected_index": self.selected, "checkpoints": summary,
                 "assumed_position": points[-1]["machine_position"][:3] if points else None,
                 "plan": copy.deepcopy(self.plan),
@@ -863,6 +883,7 @@ class Phoenix:
             gcmd.respond_info("A demonstration is open; no real print is being recovered. Continue or finish in PHOENIX_DEMO.")
             return
         messages = {"idle": "No interrupted print. Recording starts automatically with your print.",
+                    "starting": "Initializing recovery recording. Disk work is running in the background.",
                     "recording": "Recording the current print. No manual action needed.",
                     "detected": "An interrupted print is available. Open PHOENIX_RECOVERY.",
                     "prepared": "Printer parked. Clean/prime, then continue from PHOENIX_RECOVERY.",

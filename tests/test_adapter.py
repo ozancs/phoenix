@@ -1,6 +1,7 @@
 """Contract tests with Klipper-shaped fakes, not a hardware simulation."""
 import copy
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -155,9 +156,43 @@ class SD:
         self.active = True
 
 
+class TestCompletion:
+    """Host fake: pump an optional callback while disk work completes.
+
+    Real Klipper uses a greenlet reactor, not this threading.Event implementation.
+    """
+    def __init__(self, reactor):
+        self.reactor = reactor
+        self.ready = threading.Event()
+        self.result = None
+
+    def wait(self):
+        while not self.ready.wait(.001):
+            if self.reactor.on_wait:
+                self.reactor.on_wait()
+        return self.result
+
+
+class TestReactor:
+    on_wait = None
+
+    def monotonic(self):
+        return 100.
+
+    def register_timer(self, *args):
+        pass
+
+    def completion(self):
+        return TestCompletion(self)
+
+    def async_complete(self, completion, result):
+        completion.result = result
+        completion.ready.set()
+
+
 class Printer:
     def __init__(self, root):
-        self.reactor = SimpleNamespace(monotonic=lambda: 100., register_timer=lambda *args: None)
+        self.reactor = TestReactor()
         self.move, self.toolhead, self.sd = Move(), Toolhead(), SD(root)
         self.gcode = GCode(self)
         self.settings = {"printer": {"kinematics": "corexy"},

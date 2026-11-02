@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import queue
 import threading
+import time
 
 SCHEMA = 1
 
@@ -163,6 +164,53 @@ class JournalWriter:
         self.pending.join()
         if self.error:
             raise ValueError("Phoenix storage failed: " + self.error)
+
+
+def run_disk_task(reactor, task):
+    """Wait cooperatively; only pure disk/Python work may run in this worker.
+
+    Klipper completion.wait yields its greenlet to the reactor. Event.wait/join
+    on the reactor thread would reintroduce the scheduling stall we avoid here.
+    """
+    completion = reactor.completion()
+
+    def work():
+        try:
+            outcome = (task(), None)
+        except Exception as exc:
+            outcome = (None, exc)
+        reactor.async_complete(completion, outcome)
+
+    threading.Thread(target=work, name="phoenix-startup-io", daemon=True).start()
+    result, error = completion.wait()
+    if error is not None:
+        raise error
+    return result
+
+
+def initialize_recording(writer, journal, path, root, metadata, settings, replace, timings):
+    """Disk transaction on a worker, with the sampling producer stopped.
+
+    No printer/reactor/G-code APIs here. Do not publish recording until both
+    generations are durable. An older job is invalidated before replacing it.
+    """
+    def measure(name, operation):
+        start = time.monotonic()
+        try:
+            return operation()
+        finally:
+            timings[name + "_ms"] = round((time.monotonic()-start)*1000., 3)
+
+    job = dict(metadata)
+    job["file"] = measure("file_hash", lambda: file_identity(path, root))
+    job["config_hash"] = measure("config_hash", lambda: digest(settings))
+    measure("writer_drain", writer.flush)
+    if replace:
+        measure("old_recovery_close", lambda: journal.terminal("replaced"))
+    measure("journal_slot_1", lambda: journal.save(job))
+    measure("journal_slot_2", lambda: journal.save(job))
+    measure("fence_clear", journal.clear_fence)
+    return job
 
 
 def validate_snapshot(snapshot):
