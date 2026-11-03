@@ -1,5 +1,6 @@
 """Contract tests with Klipper-shaped fakes, not a hardware simulation."""
 import copy
+import json
 import tempfile
 import threading
 import unittest
@@ -410,6 +411,43 @@ class AdapterTests(unittest.TestCase):
         boot._ready()
         self.assertFalse(boot.profile_ready)
         self.assertIn("configuration changed", boot.profile_error)
+        self.assertEqual(boot.park, [15., 25.])
+
+    def test_park_approval_ignores_unrelated_config_but_recovery_does_not(self):
+        p = self.phoenix
+        p.cmd_SETUP_PROFILE(Command(X=15, Y=25, CONFIRM=1))
+        previous = p._config_hash()
+        self.printer.settings.update({"extruder": {"pid_kp": 23},
+                                      "bed_mesh saved": {"points": "1,2,3"},
+                                      "gcode_macro PRINT_START": {"gcode": "G28"},
+                                      "phoenix": {"save_interval": 3}})
+        boot = Phoenix(self.config)
+        boot._ready()
+        self.assertTrue(boot.profile_ready)
+        self.assertEqual(boot.park, [15., 25.])
+        self.assertNotEqual(previous, boot._config_hash())
+
+    def test_legacy_profile_upgrade_and_changed_config_preserve_point(self):
+        p = self.phoenix
+        p.cmd_SETUP_PROFILE(Command(X=15, Y=25, CONFIRM=1))
+        envelope = json.loads(p._profile_path().read_text())
+        profile = envelope["profile"]
+        profile.update(schema=1, config_hash=p._config_hash())
+        from klippy.extras.phoenix_core import digest
+        envelope["sha256"] = digest(profile)
+        legacy = json.dumps(envelope)
+        p._profile_path().write_text(legacy)
+        boot = Phoenix(self.config)
+        boot._ready()
+        self.assertTrue(boot.profile_ready)
+        self.assertEqual(json.loads(p._profile_path().read_text())["profile"]["schema"], 2)
+        p._profile_path().write_text(legacy)
+        self.printer.settings["extruder"] = {"pid_kp": 23}
+        boot = Phoenix(self.config)
+        boot._ready()
+        self.assertFalse(boot.profile_ready)
+        self.assertEqual(boot.park, [15., 25.])
+        self.assertIn("once", boot.profile_error)
 
     def test_setup_is_blocked_during_recovery_and_active_print(self):
         p = self.interrupted()

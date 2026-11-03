@@ -6,7 +6,7 @@ Phoenix records recent print states and helps an operator prepare, inspect and r
 an interrupted Klipper virtual-SD print. It works through ordinary G-code commands
 in Mainsail and Fluidd, with a versioned status interface for a native Voyager experience.
 
-**0.4.2 is experimental, not a hardware-validated release.**
+**0.4.3 is experimental, not a hardware-validated release.**
 Host-side tests pass; real printer validation is still required. A GitHub repository is available; no real printer validation has been performed here.
 
 ## Design decisions

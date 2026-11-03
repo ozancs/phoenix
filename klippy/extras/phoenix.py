@@ -16,7 +16,7 @@ from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, dige
                            demo_plan, recovery_plan, verify_file, capture_motion_evidence,
                            assess_evidence, run_disk_task, initialize_recording)
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
@@ -159,6 +159,19 @@ class Phoenix:
     def _profile_path(self):
         return Path(self.directory).expanduser() / "setup-profile.json"
 
+    def _park_config_hash(self):
+        # Park approval concerns machine geometry, not PID, saved meshes,
+        # print macros, or plugin settings. Recovery still uses the full hash.
+        settings = self._settings()
+        geometry = {name: options for name, options in settings.items()
+                    if name == "printer" or name.startswith("stepper_")
+                    or name in ("homing_override", "safe_z_home",
+                                "skew_correction", "z_thermal_adjust")}
+        status = self.toolhead.get_status(self.reactor.monotonic())
+        return digest({"settings": geometry,
+                       "minimum": list(status["axis_minimum"][:3]),
+                       "maximum": list(status["axis_maximum"][:3])})
+
     def _load_setup_profile(self):
         path = self._profile_path()
         if not path.exists():
@@ -166,14 +179,21 @@ class Phoenix:
         try:
             envelope = json.loads(path.read_text(encoding="utf-8"))
             profile = envelope["profile"]
-            if digest(profile) != envelope["sha256"] or profile["schema"] != 1:
+            if digest(profile) != envelope["sha256"] or profile["schema"] not in (1, 2):
                 raise ValueError("Setup profile is corrupt; review the park point again")
-            if profile["config_hash"] != self._config_hash():
-                raise ValueError("Printer configuration changed; review the park point again")
             self._validate_park(profile["park"], profile["clearance"])
             self.park, self.clearance = profile["park"], profile["clearance"]
+            expected = (self._config_hash() if profile["schema"] == 1
+                        else self._park_config_hash())
+            if profile["config_hash"] != expected:
+                raise ValueError("Printer configuration changed; saved park point retained. "
+                                 "Review it again" + (" once to upgrade the old setup profile"
+                                                     if profile["schema"] == 1 else ""))
             self.profile_ready = bool(profile["reviewed"])
             self.slicer_confirmed = bool(profile.get("slicer_confirmed", False))
+            self.profile_error = None
+            if profile["schema"] == 1:
+                self._persist_setup_profile()
         except (OSError, ValueError, KeyError, TypeError) as exc:
             self.profile_ready = False
             self.profile_error = str(exc)
@@ -189,7 +209,7 @@ class Phoenix:
             raise ValueError("Invalid Z clearance")
 
     def _persist_setup_profile(self):
-        profile = {"schema": 1, "config_hash": self._config_hash(), "park": self.park,
+        profile = {"schema": 2, "config_hash": self._park_config_hash(), "park": self.park,
                    "clearance": self.clearance, "reviewed": self.profile_ready,
                    "slicer_confirmed": self.slicer_confirmed}
         atomic_write(self._profile_path(), canonical({"profile": profile, "sha256": digest(profile)}))

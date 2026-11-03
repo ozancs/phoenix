@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.3 — 2026-11-03
+
+- Park approval uses a separate geometry fingerprint (printer, steppers, travel
+  limits, homing configuration, skew and thermal Z settings). PID tuning, saved
+  meshes, print macros and unrelated plugin settings no longer invalidate it.
+  Interrupted-print recovery continues to validate the complete configuration.
+- Valid saved coordinates remain visible when a configuration change requires
+  renewed approval, instead of silently falling back to phoenix.cfg defaults.
+- Setup profiles use schema 2. An unchanged legacy profile migrates automatically;
+  a legacy profile whose full configuration already changed needs one final review
+  because it contains no separate geometry fingerprint. Corrupt or out-of-bounds
+  profiles still cannot enable recovery. No printer movement is performed.
+
 ## 0.4.2 — 2026-11-02
 
 - PHOENIX_START offloads G-code hashing, writer drain, replacement tombstones,
