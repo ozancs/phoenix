@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.4 — 2026-11-04
+
+- Park approval now tracks only effective XYZ minimum/maximum limits and kinematics.
+  Speed, acceleration, stepper tuning and homing configuration edits no longer
+  require repeated park approval. Full interrupted-print validation is unchanged.
+- Adopt reviewed schema 1/2 profiles after checksum and current park/clearance
+  bounds validation, without requiring another confirmation. Their old hashes
+  cannot establish historical limits; schema 3 tracks future envelope changes.
+  Unreviewed, corrupt and out-of-bounds profiles remain unapproved.
+
 ## 0.4.3 — 2026-11-03
 
 - Park approval uses a separate geometry fingerprint (printer, steppers, travel

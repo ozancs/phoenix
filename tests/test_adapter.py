@@ -406,11 +406,13 @@ class AdapterTests(unittest.TestCase):
 
     def test_setup_profile_config_change_requires_review(self):
         self.phoenix.cmd_SETUP_PROFILE(Command(X=15, Y=25, CONFIRM=1))
-        self.printer.settings["stepper_z"] = {"position_max": 260}
+        original_status = self.printer.toolhead.get_status
+        self.printer.toolhead.get_status = lambda t: dict(
+            original_status(t), axis_maximum=[250., 250., 260.])
         boot = Phoenix(self.config)
         boot._ready()
         self.assertFalse(boot.profile_ready)
-        self.assertIn("configuration changed", boot.profile_error)
+        self.assertIn("Travel limits", boot.profile_error)
         self.assertEqual(boot.park, [15., 25.])
 
     def test_park_approval_ignores_unrelated_config_but_recovery_does_not(self):
@@ -420,7 +422,10 @@ class AdapterTests(unittest.TestCase):
         self.printer.settings.update({"extruder": {"pid_kp": 23},
                                       "bed_mesh saved": {"points": "1,2,3"},
                                       "gcode_macro PRINT_START": {"gcode": "G28"},
-                                      "phoenix": {"save_interval": 3}})
+                                      "phoenix": {"save_interval": 3},
+                                      "printer": {"kinematics": "corexy", "max_accel": 5000},
+                                      "stepper_z": {"homing_speed": 10},
+                                      "homing_override": {"gcode": "G28 X Y"}})
         boot = Phoenix(self.config)
         boot._ready()
         self.assertTrue(boot.profile_ready)
@@ -440,14 +445,14 @@ class AdapterTests(unittest.TestCase):
         boot = Phoenix(self.config)
         boot._ready()
         self.assertTrue(boot.profile_ready)
-        self.assertEqual(json.loads(p._profile_path().read_text())["profile"]["schema"], 2)
+        self.assertEqual(json.loads(p._profile_path().read_text())["profile"]["schema"], 3)
         p._profile_path().write_text(legacy)
         self.printer.settings["extruder"] = {"pid_kp": 23}
         boot = Phoenix(self.config)
         boot._ready()
-        self.assertFalse(boot.profile_ready)
+        self.assertTrue(boot.profile_ready)
         self.assertEqual(boot.park, [15., 25.])
-        self.assertIn("once", boot.profile_error)
+        self.assertIsNone(boot.profile_error)
 
     def test_setup_is_blocked_during_recovery_and_active_print(self):
         p = self.interrupted()
@@ -457,6 +462,27 @@ class AdapterTests(unittest.TestCase):
         self.printer.sd.active = True
         with self.assertRaises(ValueError):
             p.cmd_SETUP_SLICER(Command(CONFIRM=1))
+
+    def test_park_kinematics_change_requires_review(self):
+        self.phoenix.cmd_SETUP_PROFILE(Command(X=15, Y=25, CONFIRM=1))
+        self.printer.settings["printer"]["kinematics"] = "cartesian"
+        boot = Phoenix(self.config)
+        boot._ready()
+        self.assertFalse(boot.profile_ready)
+        self.assertIn("kinematics changed", boot.profile_error)
+
+    def test_legacy_schema_two_still_rejects_out_of_bounds(self):
+        from klippy.extras.phoenix_core import digest
+        p = self.phoenix
+        p.cmd_SETUP_PROFILE(Command(X=15, Y=25, CONFIRM=1))
+        envelope = json.loads(p._profile_path().read_text())
+        envelope["profile"].update(schema=2, park=[999., 25.])
+        envelope["sha256"] = digest(envelope["profile"])
+        p._profile_path().write_text(json.dumps(envelope))
+        boot = Phoenix(self.config)
+        boot._ready()
+        self.assertFalse(boot.profile_ready)
+        self.assertIn("exceeds travel limits", boot.profile_error)
 
     def test_setup_detects_hooks_but_not_comment_examples(self):
         self.printer.settings["gcode_macro PRINT_START"] = {"gcode": "# PHOENIX_START\nG28"}
