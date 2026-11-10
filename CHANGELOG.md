@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.5 — 2026-11-10
+
+- Introduce the Phoenix logo, a visual recovery overview and a shorter README.
+  Add concise compatibility and recovery guides; refresh setup instructions.
+- Remove internal handoff notes, Turkish documents and generated research output
+  from the published tree. Simulation tools and tests remain available.
+- When a print errors before the first checkpoint, show that no recovery point
+  exists instead of offering an empty recovery flow. A fresh print can still
+  replace the failed job automatically. Added a lifecycle regression test.
+
 ## 0.4.4 — 2026-11-04
 
 - Park approval now tracks only effective XYZ minimum/maximum limits and kinematics.
@@ -84,8 +94,8 @@
 - Part-fan signals now run at full power for two seconds each, with one second off.
   Previous speed is restored; absent standard fans produce a visible notice.
 - Setup status uses the subscription timestamp for homing state. Regression tests
-  verify unhomed → homed → current-XY save; Voyager's mode toggle alone does not save.
-- Native Voyager UI follow-up is documented separately; no Voyager files changed.
+  verify unhomed → homed → current-XY save; [Voyager](https://github.com/ozancs/voyager-ui)'s mode toggle alone does not save.
+- Native [Voyager](https://github.com/ozancs/voyager-ui) UI follow-up is documented separately; no [Voyager](https://github.com/ozancs/voyager-ui) files changed.
 - Host tests pass; printer motion and native UI validation remain pending.
 
 ## 0.3.0 — 2026-10-30
@@ -98,7 +108,7 @@
 - Adds PHOENIX_DEMO: bounded empty-bed movements, simulated interruption/checklist,
   park, pretend heat, three part-fan pulses, fan restoration and return to the same
   XYZ. No heaters, extrusion, real recovery journal or file-resume operations.
-- Exposes setup affordances and separate demo state for native Voyager integration.
+- Exposes setup affordances and separate demo state for native [Voyager](https://github.com/ozancs/voyager-ui) integration.
 - Host tests cover unhomed controls, setup jog limits, no-motion menu opening,
   complete demo, fan failure restoration and 200 varied machine-limit examples.
   Real printer validation of this version remains pending.
@@ -112,7 +122,7 @@
   support for the private repository. Access is verified before config writes.
 - Adds PHOENIX_SETUP / PHOENIX_SETUP_GUIDE and an idle-only reviewed park profile.
   Profile persistence requires neither config editing nor SAVE_CONFIG/restart.
-- Exposes structured setup progress for Voyager and updates its integration handoff.
+- Exposes structured setup progress for [Voyager](https://github.com/ozancs/voyager-ui) integrations.
 - Handles duplicate start hooks without resetting a job; new files get new jobs.
 - Local validation: 56 Python tests, 6 JavaScript tests and shell syntax checks.
   Real printer, Moonraker service and GitHub deploy-key authentication validation
@@ -120,4 +130,4 @@
 
 ## 0.1.0 — 2026-10-30
 
-- Initial experimental checkpoint journal, user-controlled recovery and Voyager contract.
+- Initial experimental checkpoint journal, user-controlled recovery and [Voyager](https://github.com/ozancs/voyager-ui) contract.

@@ -1,101 +1,52 @@
-# Setup guide (0.2)
+# Set up Phoenix
 
-There are two parts: host installation and a printer-side review. Opening either part does not move or heat the printer. The runtime guide offers
-explicit empty-bed homing and XY jog actions before saving the selected park point. The installer changes configuration only after displaying its
-plan and obtaining a terminal confirmation (or explicit --yes).
+Install while your printer is idle. The installer previews its changes, saves backups and connects Phoenix to your print macros and Moonraker Update Manager.
 
-## Host installation
+## Install
 
-`bash scripts/install.sh` performs include traversal, force_move merge, print hook
-insertion, module links and Update Manager integration. Config diffs are previewed;
-all edited originals are backed up with exact bytes and a manifest. A failed config
-write rolls back completed writes. If power fails between writes, use the printed
-backup directory/manifest to restore originals before restarting; this is not a
-multi-file filesystem transaction. Backups are outside the config include tree so
-wildcards cannot accidentally load them.
-
-- Existing hooks/includes are not duplicated on rerun.
-- User park values are not overwritten.
-- Existing main-file SAVE_CONFIG blocks remain byte-identical and at the end.
-- A changed file between preview/apply stops setup.
-- Shared configuration outside the selected instance is not automatically rewritten.
-- Unknown print status allows configuration preparation but never automatic restart.
-- Running or paused prints stop application. A fresh idle check precedes restart.
-- --check never changes configuration, module links, Git settings or services.
-- --yes applies without asking; it does not imply --restart.
-- MOONRAKER_API_KEY may be provided as an environment variable if local API access
-  needs authentication. It is not written into any configuration or console output.
-
-Options: --config-dir, --klipper-dir, --moonraker-url, --start-macro, --end-macro,
---check, --yes, --restart, --deploy-key. Existing CONFIG_DIR / KLIPPER_DIR environment
-variables remain supported. See PRIVATE-REPO.md for deploy-key setup.
-
-Automatic macro choices: PRINT_START or START_PRINT; PRINT_END or END_PRINT. If both
-aliases exist, select explicitly. Hook insertion is at the top level of the gcode
-body, outside Jinja conditionals: START at the end, END at the beginning. Review the
-preview for macros which schedule deferred/asynchronous work; textual position
-cannot prove all external initialization has completed. Custom macros can be named
-with the command-line options. No standard macro means the guide provides slicer
-instructions instead of claiming automatic integration. Already-sliced files only
-benefit if they call the modified macros.
-
-## Printer-side guide
-
-`PHOENIX_SETUP_GUIDE` is a visible macro opening `PHOENIX_SETUP`.
-The standard action:prompt UI works independently of Voyager. Console-only clients
-can run `PHOENIX_SETUP PROMPT=0` for a short human-readable summary. Add DETAILS=1 only for a diagnostic JSON report.
-
-1. Module loaded.
-2. Compatible configuration (unsupported kinematics/transforms are reported).
-3. Print hooks present, or explicit slicer-only acknowledgement.
-4. Park point and path reviewed on an empty bed.
-5. Small supervised test print (manual verification, never silently marked tested).
-
-To save reviewed machine coordinates:
-
-```gcode
-PHOENIX_SETUP_PROFILE X=10 Y=10 CLEARANCE=5 CONFIRM=1
+```sh
+cd ~
+git clone https://github.com/ozancs/phoenix.git phoenix-for-klipper
+cd ~/phoenix-for-klipper
+bash scripts/install.sh
 ```
 
-To use the current XY after normal printer controls positioned it:
+For a private repository, use the [deploy-key instructions](PRIVATE-REPO.md) first. Review and accept the install plan, then accept the offered restart when the printer is idle. If setup cannot identify your print macros, it explains what remains to connect.
 
-```gcode
-PHOENIX_SETUP_PROFILE USE_CURRENT=1 CONFIRM=1
+## Choose your park point
+
+Open **PHOENIX_SETUP_GUIDE** from the macro list, or run `PHOENIX_SETUP`. In [Voyager](https://github.com/ozancs/voyager-ui), you can use the Phoenix setup screen.
+
+1. Clear the bed and home using the normal printer controls.
+2. Move to a suitable park point with a clear approach and enough lifting clearance.
+3. Save the current XY, or enter machine coordinates in the setup screen where available.
+4. Confirm that the bed and route are clear, then finish setup.
+
+The point is saved immediately; no SAVE_CONFIG or extra restart is needed. Normal tuning changes and software updates preserve it. A change to XYZ travel limits or kinematics requires a new review. Setup does not prove a route will be clear of every future print.
+
+Try **PHOENIX_DEMO** on the empty bed, then follow the [first printer test](TESTING.md). After setup, recording starts and stops automatically with your print hooks.
+
+## Updates
+
+Update Phoenix through Moonraker Update Manager in [Voyager](https://github.com/ozancs/voyager-ui), Mainsail or Fluidd, then restart Klipper while idle. Updates do not require choosing the park point again unless its travel limits or kinematics changed.
+
+## Custom installations
+
+Preview without applying changes:
+
+```sh
+bash scripts/install.sh --check
 ```
 
-The latter requires XY homed and waits for pending moves; it does not issue new
-motion. Its default clearance is the displayed configured value. To acknowledge
-slicer-only integration after actually adding both commands:
+For another printer instance or custom macro names:
 
-```gcode
-PHOENIX_SETUP_SLICER CONFIRM=1
+```sh
+bash scripts/install.sh --config-dir ~/printer_2_data/config --moonraker-url http://127.0.0.1:7126 \
+  --start-macro MY_PRINT_START --end-macro MY_PRINT_END
 ```
 
-Profile and acknowledgement are saved in checksummed setup-profile.json under the
-Phoenix state directory. No configfile.set/SAVE_CONFIG is used, avoiding conflicts
-with included config files. No restart is needed. A config fingerprint change or
-corrupt profile requires park review again. These edits are rejected while printing,
-paused, busy or while an unfinished recovery exists. Setup does not certify the
-physical route and does not resolve Z-hop uncertainty.
+If your slicer handles initialization without a suitable macro, add `PHOENIX_START` after initialization and before printing the model, and `PHOENIX_END` before end/park/heater-off actions. Reslice existing files, then acknowledge the hooks in setup. Phoenix cannot edit the slicer on your computer.
 
-`setup.complete` means configuration/review are ready, not that a hardware test has
-passed. The test step remains manual. Discarding a failed print does not erase the
-reviewed setup profile.
+Rerunning the installer does not duplicate existing hooks or overwrite your park settings. Backups live in `printer_data/phoenix-setup-backups/`. The options `--klipper-dir`, `--deploy-key`, `--yes` and `--restart` are also available; `--yes` alone does not restart services. Never install during a print.
 
-## Simpler interaction in 0.3
-
-If setup is already complete, show the saved point, Change park point and Finish.
-When editing an unhomed printer, offer the home step before jog/save controls.
-`_PHOENIX_SETUP_HOME BED_CLEAR=1 CONFIRM=1` invokes the user's normal G28 routine
-only while idle with no recovery. It may include user-defined homing behavior;
-it is an explicit setup action on an empty bed, not a recovery action.
-
-Once homed, 1/10 mm XY jog buttons move within limits and lift to at least the
-configured clearance above Z minimum first. `_PHOENIX_SETUP_JOG AXIS=X DISTANCE=1
-CONFIRM=1` is an internal button command. **Save park and finish** persists the point,
-prints one short confirmation and closes the prompt. Standard macro prompts do not
-provide portable number-input fields; native Voyager can provide those fields using
-SETUP_PROFILE. The fallback supplies jog buttons instead.
-
-No normal setup action dumps JSON. Live object status supplies frontend data.
-PHOENIX_STATUS is short by default; DETAILS=1 is the explicit diagnostic option.
+[Back to Phoenix](../README.md) · [Compatibility](COMPATIBILITY.md) · [Recovery guide](RECOVERY.md)

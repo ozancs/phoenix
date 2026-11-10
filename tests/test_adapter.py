@@ -271,6 +271,26 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.printer.toolhead.moves, [])
         self.assertEqual(self.printer.gcode.commands[before:], [])
 
+    def test_error_before_first_checkpoint_blocks_empty_recovery(self):
+        p = self.phoenix
+        self.printer.sd.from_sd = True
+        p.cmd_START(Command())
+        self.printer.stats["state"] = "error"
+        p._sample(100.)
+        self.assertFalse(p.active)
+        self.assertEqual(p.phase, "blocked")
+        self.assertFalse(p.get_status(100.)["recovery_available"])
+        self.assertIn("before Phoenix saved", p.error)
+        with self.assertRaisesRegex(ValueError, "before Phoenix saved"):
+            p.cmd_SELECT(Command(INDEX=0))
+        p.writer.flush()
+        self.assertEqual(p.journal.load()["phase"], "blocked")
+        self.assertEqual(self.printer.toolhead.moves, [])
+        self.printer.sd.current_file = object()
+        p.cmd_START(Command())
+        self.assertEqual(p.phase, "recording")
+        self.assertIsNone(p.error)
+
     def test_prepare_requires_all_checks(self):
         p = self.interrupted()
         p.checks["axes_unmoved"] = False

@@ -16,7 +16,7 @@ from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, dige
                            demo_plan, recovery_plan, verify_file, capture_motion_evidence,
                            assess_evidence, run_disk_task, initialize_recording)
 
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
@@ -617,10 +617,10 @@ class Phoenix:
         # Runtime mesh offsets are not exposed in get_status; reject them instead
         # of silently loading an unshifted profile on recovery.
         if mesh and getattr(mesh, "tool_offset", 0.):
-            raise ValueError("Runtime BED_MESH_OFFSET is not supported in Phoenix 0.1")
+            raise ValueError("Runtime BED_MESH_OFFSET is not supported in Phoenix")
         z_mesh = getattr(mesh, "z_mesh", None)
         if z_mesh and any(getattr(z_mesh, "mesh_offsets", [0., 0.])):
-            raise ValueError("Runtime mesh XY offsets are not supported in Phoenix 0.1")
+            raise ValueError("Runtime mesh XY offsets are not supported in Phoenix")
         return result
 
     def _save_gcode_state(self):
@@ -631,7 +631,7 @@ class Phoenix:
         state = self._save_gcode_state()
         machine = list(self.toolhead.get_position())
         if len(machine) != 4:
-            raise ValueError("Additional motion axes are not supported in Phoenix 0.1")
+            raise ValueError("Additional motion axes are not supported in Phoenix")
         extruder = self._status("extruder")
         limits = self.toolhead.get_status(self.reactor.monotonic())
         fans = {name: obj.get_status(self.reactor.monotonic())["speed"]
@@ -639,7 +639,7 @@ class Phoenix:
         fans["fan"] = self._status("fan").get("speed", 0.)
         exclusions = self._status("exclude_object").get("excluded_objects", [])
         if exclusions:
-            raise ValueError("Active object exclusion is not supported in Phoenix 0.1")
+            raise ValueError("Active object exclusion is not supported in Phoenix")
         retract = self.printer.lookup_object("firmware_retraction", None)
         if retract and getattr(retract, "is_retracted", False):
             # Do not record a hidden retract state; existing checkpoints remain usable.
@@ -676,6 +676,10 @@ class Phoenix:
                 self._finish(stats["state"])
                 return eventtime + self.interval
             if stats.get("state") == "error":
+                if not self.job.get("checkpoints"):
+                    self._block("The print stopped before Phoenix saved a recovery point. "
+                                "Start a new print or discard this recovery.")
+                    return eventtime + self.interval
                 self.active = False
                 self.phase, self.reason = "detected", "print_error"
                 self._event("interrupted")
@@ -743,7 +747,7 @@ class Phoenix:
     def _compatible(self):
         settings = self._settings()
         if settings.get("printer", {}).get("kinematics") not in ("cartesian", "corexy"):
-            raise ValueError("Phoenix 0.1 supports Cartesian and CoreXY printers")
+            raise ValueError("Phoenix supports Cartesian and CoreXY printers")
         unsupported = ("dual_carriage", "skew_correction", "z_thermal_adjust", "bed_tilt",
                        "bed_mesh_offset", "extruder1", "manual_stepper")
         for section in settings:

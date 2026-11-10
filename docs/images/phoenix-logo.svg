@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+<title id="title">Phoenix for Klipper</title><desc id="desc">An amber phoenix rising on a charcoal tile, in the Voyager visual family.</desc>
+<rect width="128" height="128" rx="28" fill="#23262b"/>
+<path d="M64 68 18 33 29 66 52 83 43 112 64 94 85 112 76 83 99 66 110 33Z" fill="#f5b23a"/>
+<path d="m64 77-9-26 11-17 17 7-13 6 3 18Z" fill="#f5b23a"/>
+<path d="m27 47 28 29m46-29L73 76M64 94V80" fill="none" stroke="#23262b" stroke-width="4" stroke-linecap="round"/>
+<g fill="#f5b23a"><path d="m64 10 4 9-4 8-4-8Z"/><circle cx="43" cy="25" r="2.5"/><circle cx="87" cy="24" r="2"/></g>
+</svg>
