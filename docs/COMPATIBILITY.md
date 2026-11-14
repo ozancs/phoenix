@@ -19,4 +19,4 @@ Z-hop is allowed, but an outage during a hop can leave physical Z different from
 
 Phoenix never homes Z during recovery. Optional XY homing requires a separately reviewed routine; it does not correct an unknown Z position. If the axes or plate moved, do not confirm that they stayed in place.
 
-[Back to Phoenix](../README.md) · [First printer test](TESTING.md)
+[Back to Phoenix](../README.md) · [Setup guide](SETUP.md)

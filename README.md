@@ -27,6 +27,6 @@ bash scripts/install.sh
 
 The installer previews its changes, backs up your configuration and connects the print hooks and updater. After reconnecting, open **PHOENIX_SETUP_GUIDE** to choose your park point. Then print normally.
 
-[Setup & updates](docs/SETUP.md) · [Private repository access](docs/PRIVATE-REPO.md) · [Recovery guide](docs/RECOVERY.md) · [Release notes](CHANGELOG.md)
+[Setup & updates](docs/SETUP.md) · [Recovery guide](docs/RECOVERY.md) · [Release notes](CHANGELOG.md)
 
 <sub>Licensed under <a href="LICENSE">GPL-3.0-or-later</a>.</sub>

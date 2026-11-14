@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.6 - 2026-11-15
+
+- Simplify documentation to setup, compatibility, demo and recovery guides.
+- Remove private-repository instructions and internal development documentation.
+- No changes to printer behavior.
+
 ## 0.4.5 — 2026-11-10
 
 - Introduce the Phoenix logo, a visual recovery overview and a shorter README.

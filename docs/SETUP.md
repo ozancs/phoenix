@@ -11,7 +11,7 @@ cd ~/phoenix-for-klipper
 bash scripts/install.sh
 ```
 
-For a private repository, use the [deploy-key instructions](PRIVATE-REPO.md) first. Review and accept the install plan, then accept the offered restart when the printer is idle. If setup cannot identify your print macros, it explains what remains to connect.
+Review and accept the install plan, then accept the offered restart when the printer is idle. If setup cannot identify your print macros, it explains what remains to connect.
 
 ## Choose your park point
 
@@ -24,7 +24,7 @@ Open **PHOENIX_SETUP_GUIDE** from the macro list, or run `PHOENIX_SETUP`. In [Vo
 
 The point is saved immediately; no SAVE_CONFIG or extra restart is needed. Normal tuning changes and software updates preserve it. A change to XYZ travel limits or kinematics requires a new review. Setup does not prove a route will be clear of every future print.
 
-Try **PHOENIX_DEMO** on the empty bed, then follow the [first printer test](TESTING.md). After setup, recording starts and stops automatically with your print hooks.
+Try **PHOENIX_DEMO** on the empty bed, then start with a small supervised print. After setup, recording starts and stops automatically with your print hooks.
 
 ## Updates
 
