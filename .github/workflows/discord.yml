@@ -17,6 +17,7 @@ jobs:
           WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         shell: python
         run: |
+          import json
           import os
           import sys
           import urllib.error
@@ -34,18 +35,42 @@ jobs:
           path = parts.path.rstrip("/")
           if not path.startswith("/api/webhooks/"):
               sys.exit("::error::DISCORD_WEBHOOK is not a webhook URL.")
-          if not path.endswith("/github"):
-              path += "/github"
-          url = urllib.parse.urlunsplit(parts._replace(path=path))
+          if path.endswith("/github"):
+              path = path[:-7]
+          query = dict(urllib.parse.parse_qsl(parts.query))
+          query["wait"] = "true"
+          url = urllib.parse.urlunsplit(parts._replace(
+              path=path, query=urllib.parse.urlencode(query)))
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+          ref = event.get("ref", "")
+          repo = event["repository"]["full_name"]
+          base = "https://github.com/" + repo
+          if ref.startswith("refs/tags/"):
+              tag = ref[len("refs/tags/"):]
+              title = "Phoenix " + tag
+              description = "A new Phoenix version is available."
+              link = base + "/tree/" + urllib.parse.quote(tag, safe="")
+          else:
+              title = "Phoenix updated"
+              commits = event.get("commits", [])
+              description = "\n".join(
+                  "- " + c.get("message", "").split("\n", 1)[0][:300]
+                  for c in commits[-10:]) or "New changes pushed to main."
+              link = base + "/commit/" + event["after"]
+          payload = {"username": "oznlab releases", "allowed_mentions": {"parse": []},
+                     "embeds": [{"title": title[:256], "url": link,
+                                 "description": description[:3900], "color": 16101946}]}
           request = urllib.request.Request(
-              url, data=Path(os.environ["GITHUB_EVENT_PATH"]).read_bytes(),
-              headers={"Content-Type": "application/json", "X-GitHub-Event": "push",
+              url, data=json.dumps(payload).encode("utf-8"),
+              headers={"Content-Type": "application/json",
                        "User-Agent": "Phoenix-GitHub-Feed"}, method="POST")
           try:
               with urllib.request.urlopen(request, timeout=30) as response:
-                  response.read()
+                  message = json.load(response)
           except urllib.error.HTTPError as error:
               sys.exit("::error::Discord rejected the notification (HTTP %d)." % error.code)
           except urllib.error.URLError:
               sys.exit("::error::Could not reach Discord.")
-          print("Discord push notification sent.")
+          if not isinstance(message, dict) or not message.get("id"):
+              sys.exit("::error::Discord did not confirm a created message.")
+          print("Discord message created: " + str(message["id"]))

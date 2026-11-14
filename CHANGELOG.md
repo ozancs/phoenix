@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.8 - 2026-11-15
+
+- Send explicit Discord messages for version tags and main pushes, and verify
+  that Discord returns a created message ID before reporting success.
+- No changes to printer behavior.
+
 ## 0.4.7 - 2026-11-15
 
 - Add Discord feed notifications for main-branch and version-tag pushes.
