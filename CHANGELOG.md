@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.9 - 2026-11-15
+
+- Discord announcements now include the release notes for the published version.
+- Only new version tags send announcements; ordinary pushes stay quiet.
+- No changes to printer behavior.
+
 ## 0.4.8 - 2026-11-15
 
 - Send explicit Discord messages for version tags and main pushes, and verify

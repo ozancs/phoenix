@@ -1,24 +1,29 @@
-name: Discord push feed
+name: Discord release notes
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   notify:
+    if: github.event.created && !github.event.deleted
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Send push to Discord
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Send release notes to Discord
         env:
           WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         shell: python
         run: |
           import json
           import os
+          import re
           import sys
           import urllib.error
           import urllib.parse
@@ -45,18 +50,27 @@ jobs:
           ref = event.get("ref", "")
           repo = event["repository"]["full_name"]
           base = "https://github.com/" + repo
-          if ref.startswith("refs/tags/"):
-              tag = ref[len("refs/tags/"):]
-              title = "Phoenix " + tag
-              description = "A new Phoenix version is available."
-              link = base + "/tree/" + urllib.parse.quote(tag, safe="")
-          else:
-              title = "Phoenix updated"
-              commits = event.get("commits", [])
-              description = "\n".join(
-                  "- " + c.get("message", "").split("\n", 1)[0][:300]
-                  for c in commits[-10:]) or "New changes pushed to main."
-              link = base + "/commit/" + event["after"]
+          if not ref.startswith("refs/tags/") or not event.get("created") or event.get("deleted"):
+              sys.exit(0)
+          tag = ref[len("refs/tags/"):]
+          title = "Phoenix " + tag
+          link = base + "/tree/" + urllib.parse.quote(tag, safe="")
+          notes_link = base + "/blob/" + urllib.parse.quote(tag, safe="") + "/CHANGELOG.md"
+          version = tag.removeprefix("v")
+          notes, selected = [], False
+          for line in Path("CHANGELOG.md").read_text(encoding="utf-8-sig").splitlines():
+              heading = re.match(r"^##\s+(\S+)", line)
+              if heading:
+                  if selected:
+                      break
+                  selected = heading.group(1).removeprefix("v") == version
+              elif selected:
+                  notes.append(line)
+          description = "\n".join(notes).strip()
+          if not description:
+              description = "[Read the release notes](" + notes_link + ")"
+          elif len(description) > 3900:
+              description = description[:3700].rstrip() + "\n\n[Read the full release notes](" + notes_link + ")"
           payload = {"username": "oznlab releases", "allowed_mentions": {"parse": []},
                      "embeds": [{"title": title[:256], "url": link,
                                  "description": description[:3900], "color": 16101946}]}
