@@ -1,0 +1,51 @@
+name: Discord push feed
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Send push to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        shell: python
+        run: |
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          url = os.environ.get("WEBHOOK", "").strip()
+          if not url:
+              print("::notice::Discord notification not sent: add the DISCORD_WEBHOOK repository secret.")
+              sys.exit(0)
+          parts = urllib.parse.urlsplit(url)
+          if parts.scheme != "https" or parts.hostname not in ("discord.com", "discordapp.com"):
+              sys.exit("::error::DISCORD_WEBHOOK must be a Discord HTTPS webhook URL.")
+          path = parts.path.rstrip("/")
+          if not path.startswith("/api/webhooks/"):
+              sys.exit("::error::DISCORD_WEBHOOK is not a webhook URL.")
+          if not path.endswith("/github"):
+              path += "/github"
+          url = urllib.parse.urlunsplit(parts._replace(path=path))
+          request = urllib.request.Request(
+              url, data=Path(os.environ["GITHUB_EVENT_PATH"]).read_bytes(),
+              headers={"Content-Type": "application/json", "X-GitHub-Event": "push",
+                       "User-Agent": "Phoenix-GitHub-Feed"}, method="POST")
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  response.read()
+          except urllib.error.HTTPError as error:
+              sys.exit("::error::Discord rejected the notification (HTTP %d)." % error.code)
+          except urllib.error.URLError:
+              sys.exit("::error::Could not reach Discord.")
+          print("Discord push notification sent.")

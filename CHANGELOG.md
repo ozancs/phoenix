@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.7 - 2026-11-15
+
+- Add Discord feed notifications for main-branch and version-tag pushes.
+- No changes to printer behavior.
+
 ## 0.4.6 - 2026-11-15
 
 - Simplify documentation to setup, compatibility, demo and recovery guides.
