@@ -226,26 +226,42 @@ def validate_snapshot(snapshot):
             raise ValueError("Invalid feed/extrusion state")
 
 
-def recovery_plan(latest, selected, clearance, park, limits):
+MIN_CLEARANCE = 1.0
+
+
+def recovery_plan(latest, selected, clearance, park, limits, max_z=None):
     """Current position ALWAYS comes from latest, never the selected older point.
 
     All positions are machine/toolhead coordinates, not G-code coordinates.
-    Lift above both endpoints, traverse at clearance, then descend separately.
+    Lift above both endpoints and the tallest point printed so far (max_z, for
+    sequential prints), traverse at clearance, then descend separately. Near
+    the Z limit the clearance shrinks, never below MIN_CLEARANCE.
     """
     validate_snapshot(latest)
     validate_snapshot(selected)
+    if not math.isfinite(clearance) or clearance <= 0:
+        raise ValueError("Clearance must be positive")
     current = latest["machine_position"][:3]
     target = selected["machine_position"][:3]
-    safe_z = max(current[2], target[2]) + clearance
+    top = max(current[2], target[2])
+    if max_z is not None:
+        if not math.isfinite(max_z):
+            raise ValueError("Invalid recorded print height")
+        top = max(top, max_z)
+    room = limits[1][2] - top
+    effective = min(clearance, room)
+    if effective < min(clearance, MIN_CLEARANCE):
+        raise ValueError("lift exceeds Z travel limits: only %.2f mm above the print" % max(room, 0.))
+    safe_z = top + effective
     points = {"assumed": current, "lift": [current[0], current[1], safe_z],
               "park": [park[0], park[1], safe_z],
               "above_target": [target[0], target[1], safe_z], "target": target}
-    if not math.isfinite(clearance) or clearance <= 0:
-        raise ValueError("Clearance must be positive")
     for label, point in points.items():
         for axis, value in enumerate(point):
             if not math.isfinite(value) or not limits[0][axis] <= value <= limits[1][axis]:
                 raise ValueError("%s exceeds %s travel limits" % (label, "XYZ"[axis]))
+    points["clearance"] = effective
+    points["clearance_reduced"] = effective < clearance
     return points
 
 

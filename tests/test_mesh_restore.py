@@ -106,3 +106,17 @@ class MeshRecoveryTests(unittest.TestCase):
         for key in ("mesh_params", "raw_probed_matrix", "raw_mesh_matrix"):
             self.p.target["mesh"].pop(key)
         self.assertTrue(self.p._mesh_matches())
+
+    def test_mesh_stored_once_per_job_and_restored_from_record(self):
+        bed, original = self.recorded("bicubic")
+        bed.z_mesh = original
+        first = self.p._mesh_record()
+        second = self.p._mesh_record()
+        self.assertEqual(first[0], second[0])
+        self.assertNotIn("mesh_matrix", first[1])  # Rounded matrices are derived.
+        self.p.job = {"meshes": {first[0]: first[1]}}
+        self.p.target = {"mesh": self.p._point_mesh({"mesh_id": first[0]})}
+        bed.z_mesh = None
+        self.p._restore_mesh()
+        self.assertTrue(self.p._mesh_matches())
+        self.assertEqual(original.calc_z(71.3, 82.7), bed.z_mesh.calc_z(71.3, 82.7))

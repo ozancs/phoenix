@@ -126,9 +126,21 @@ class PlanTests(unittest.TestCase):
         plan = self.plan(snapshot(20.), snapshot(20.6))
         self.assertEqual(plan["lift"][2], 25.6)
 
-    def test_insufficient_headroom_rejected_not_clamped(self):
+    def test_insufficient_headroom_rejected_below_minimum(self):
         with self.assertRaisesRegex(ValueError, "travel limits"):
-            self.plan(snapshot(249.))
+            self.plan(snapshot(249.5), snapshot(249.5))
+
+    def test_headroom_near_z_max_clamps_clearance(self):
+        plan = self.plan(snapshot(247.), snapshot(247.))
+        self.assertEqual(plan["lift"][2], 250.)
+        self.assertEqual(plan["clearance"], 3.)
+        self.assertTrue(plan["clearance_reduced"])
+
+    def test_sequential_print_lifts_above_tallest_object(self):
+        plan = recovery_plan(snapshot(20.6, x=130.), snapshot(), 5., [10., 10.],
+                             ([0., 0., 0.], [250., 250., 250.]), max_z=80.)
+        self.assertEqual(plan["lift"][2], 85.)
+        self.assertEqual(plan["above_target"][2], 85.)
 
     def test_no_diagonal_descent(self):
         plan = self.plan()

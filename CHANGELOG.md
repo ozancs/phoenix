@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.12 - 2026-11-16
+
+- Store the bed mesh once per print instead of in every recovery point. Large scan meshes no longer grow the recovery file to several MB every two seconds.
+- Keep the printer's idle timeout from switching motors and heaters off while you clean and prime at the park point (up to `recovery_idle_timeout`, 60 min by default). The original timeout returns when recovery resumes, is discarded or stops.
+- Earlier recovery points can only be chosen on the current layer, so the nozzle never descends into plastic printed later.
+- A power loss while the print was paused now starts from the paused head position.
+- Axes that are still homed when recovery is prepared use their real position instead of the saved estimate.
+- The lift clears the tallest point printed so far (sequential prints). Near the top of the Z travel the clearance is reduced, down to 1 mm, instead of refusing.
+- New `PHOENIX_HEAT` heats bed, chamber and nozzle to the saved temperatures without moving. New `PHOENIX_PRIME LENGTH=10` extrudes or retracts at the park point.
+- Resuming heats the bed first, then the nozzle, so it does not ooze after cleaning. Chamber heaters are restored. Optional `bed_soak` waits after the bed reaches temperature.
+- Objects excluded during the print are excluded again after recovery instead of stopping recording.
+- A resume refused at the park point (for example after a jog) keeps the recovery available.
+- The console recovery screen (Mainsail, Fluidd, KlipperScreen) shows the file, resume point and temperatures, offers heating, priming, same-layer point selection and Discard, and reopens with the error when a step fails.
+- Errors name the Phoenix version. A startup macro that homes or probes is reported as a warning.
+- Try the empty-bed demo and a supervised test print after updating.
+
 ## 0.4.11 - 2026-11-16
 
 - Restore adaptive and unsaved bed meshes from complete recovery records without probing.

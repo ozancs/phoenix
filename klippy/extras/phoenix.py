@@ -16,8 +16,11 @@ from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, dige
                            demo_plan, recovery_plan, verify_file, capture_motion_evidence,
                            assess_evidence, run_disk_task, initialize_recording)
 
-VERSION = "0.4.11"
+VERSION = "0.4.12"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+OBJECT_NAME = re.compile(r"^[^\s=|;]+$")
+STARTUP_MOTION = re.compile(r"\b(G28|BED_MESH_CALIBRATE|QUAD_GANTRY_LEVEL|Z_TILT_ADJUST|PROBE)\b", re.I)
+SELECTION_TOLERANCE = 0.001
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
 CHECK_TEXT = {
@@ -44,7 +47,13 @@ class Phoenix:
         self.clearance = config.getfloat("clearance", 5., above=0.)
         self.travel_speed = config.getfloat("travel_speed", 40., above=0., maxval=100.)
         self.z_speed = config.getfloat("z_speed", 3., above=0., maxval=20.)
+        # Kept for existing installs; older points must also stay on the same layer.
         self.max_selection_z_delta = config.getfloat("max_selection_z_delta", 2., minval=0.)
+        self.recovery_idle_timeout = config.getfloat("recovery_idle_timeout", 3600., minval=60., maxval=21600.)
+        self.bed_soak = config.getfloat("bed_soak", 0., minval=0., maxval=1800.)
+        self.idle_saved = None
+        self.notice = None
+        self.mesh_cache = None
         macro = self.printer.load_object(config, "gcode_macro")
         self.home_xy = macro.load_template(config, "home_xy_gcode", "")
         self.directory = config.get("state_path", "~/printer_data/phoenix")
@@ -60,6 +69,7 @@ class Phoenix:
         self.plan = None
         self.error = None
         self.layer_z = None
+        self.position_source = None
         self.revision = 0
         self.busy = False
         self.demo = {"phase": "off"}
@@ -70,9 +80,11 @@ class Phoenix:
         self.journal = self.writer = None
         for name in ("START", "END", "STATUS", "SELECT", "CHECK", "PREPARE",
                      "RESUME", "DISCARD", "PROMPT", "LAYER", "SETUP",
-                     "SETUP_PROFILE", "SETUP_SLICER", "DEMO", "ANALYZE"):
+                     "SETUP_PROFILE", "SETUP_SLICER", "DEMO", "ANALYZE", "HEAT", "PRIME"):
             self.gcode.register_command("PHOENIX_" + name, getattr(self, "cmd_" + name),
                                         desc={"SETUP": "Set up Phoenix or change the park point",
+                                              "HEAT": "Heat bed and nozzle to the saved print temperatures",
+                                              "PRIME": "Extrude (or retract) at the recovery park point",
                                               "STATUS": "Show Phoenix recording and recovery status",
                                               "ANALYZE": "Explain recovery evidence and uncertainty without moving",
                                               "DEMO": "Try recovery on an empty bed, without heating or extrusion",
@@ -107,6 +119,8 @@ class Phoenix:
             self._event("ready")
             if not self._setup_status()["complete"]:
                 self.gcode.respond_info("Phoenix setup needs attention. Open PHOENIX_SETUP_GUIDE or run PHOENIX_SETUP.")
+            for warning in self._startup_risks():
+                self.gcode.respond_info("Phoenix warning: " + warning)
             if self.phase in ("detected", "blocked"):
                 self.gcode.respond_info("Phoenix: interrupted print detected (power loss or restart). "
                                         "No automatic motion. Run PHOENIX_PROMPT or PHOENIX_STATUS.")
@@ -137,8 +151,41 @@ class Phoenix:
             self._block("Z homing is not allowed during Phoenix recovery.")
             raise self.gcode.error(self.error)
 
+    def _startup_risks(self):
+        risks = []
+        for name, options in self._settings().items():
+            if not name.startswith("delayed_gcode "):
+                continue
+            try:
+                delay = float(options.get("initial_duration", 0) or 0)
+            except (TypeError, ValueError):
+                delay = 0.
+            if delay > 0 and STARTUP_MOTION.search(options.get("gcode", "")):
+                risks.append("[%s] homes, probes or levels at startup. After a power loss this can "
+                             "drive the nozzle into the print before recovery opens." % name)
+        return risks
+
+    def _extend_idle_timeout(self):
+        # Klipper's idle_timeout (default 10 min) runs M84 and blocks recovery.
+        idle = self.printer.lookup_object("idle_timeout", None)
+        current = getattr(idle, "idle_timeout", None)
+        if self.idle_saved is not None or not isinstance(current, (int, float)):
+            return
+        if current < self.recovery_idle_timeout:
+            self.idle_saved = current
+            idle.idle_timeout = self.recovery_idle_timeout
+
+    def _restore_idle_timeout(self):
+        if self.idle_saved is None:
+            return
+        idle = self.printer.lookup_object("idle_timeout", None)
+        if idle is not None and hasattr(idle, "idle_timeout"):
+            idle.idle_timeout = self.idle_saved
+        self.idle_saved = None
+
     def _block(self, message):
         self.active = False
+        self._restore_idle_timeout()
         self.phase, self.error = "blocked", message
         if self.job and self.writer:
             self.job["phase"], self.job["error"] = "blocked", message
@@ -259,7 +306,9 @@ class Phoenix:
                                   "Phoenix setup is not finished. Open PHOENIX_SETUP_GUIDE.")
             return
         send = lambda line: self.gcode.respond_raw("// action:prompt_" + line)
-        send("begin Phoenix setup")
+        send("begin Phoenix %s setup" % VERSION)
+        for warning in self._startup_risks():
+            send("text Warning: " + warning)
         if not status["can_edit"]:
             send("text Finish the current print or close the interrupted-print recovery before changing setup.")
         elif any(step["state"] == "blocked" for step in status["steps"]):
@@ -627,6 +676,40 @@ class Phoenix:
             result["raw_mesh_matrix"] = copy.deepcopy(z_mesh.mesh_matrix)
         return result
 
+    def _mesh_record(self):
+        """Mesh stored ONCE per job; checkpoints keep only its id.
+
+        Klipper replaces z_mesh on every load/calibration, so object identity is
+        a cheap change detector. Offsets are still rejected on every sample.
+        """
+        mesh = self.printer.lookup_object("bed_mesh", None)
+        if mesh and getattr(mesh, "tool_offset", 0.):
+            raise ValueError("Runtime BED_MESH_OFFSET is not supported in Phoenix")
+        z_mesh = getattr(mesh, "z_mesh", None)
+        if z_mesh and any(getattr(z_mesh, "mesh_offsets", [0., 0.])):
+            raise ValueError("Runtime mesh XY offsets are not supported in Phoenix")
+        if z_mesh is not None and self.mesh_cache and self.mesh_cache[0] is z_mesh:
+            return self.mesh_cache[1], self.mesh_cache[2]
+        full = self._mesh()
+        if z_mesh is not None:
+            # Rounded status matrices are derived again during recovery.
+            record = {key: full[key] for key in ("profile_name", "mesh_min", "mesh_max",
+                                                  "mesh_params", "raw_probed_matrix", "raw_mesh_matrix")}
+        else:
+            record = full
+        record = json.loads(canonical(record).decode("ascii"))
+        mesh_id = digest(record)[:16]
+        self.mesh_cache = (z_mesh, mesh_id, record) if z_mesh is not None else None
+        return mesh_id, record
+
+    def _point_mesh(self, point):
+        if "mesh_id" in point:
+            meshes = self.job.get("meshes", {})
+            if point["mesh_id"] not in meshes:
+                raise ValueError("Recorded bed mesh is missing from the recovery record")
+            return copy.deepcopy(meshes[point["mesh_id"]])
+        return copy.deepcopy(point["mesh"])
+
     def _save_gcode_state(self):
         self.gcode.run_script_from_command("SAVE_GCODE_STATE NAME=__PHOENIX_CAPTURE")
         return copy.deepcopy(self.move.saved_states["__PHOENIX_CAPTURE"])
@@ -641,13 +724,17 @@ class Phoenix:
         fans = {name: obj.get_status(self.reactor.monotonic())["speed"]
                 for name, obj in self.printer.lookup_objects("fan_generic")}
         fans["fan"] = self._status("fan").get("speed", 0.)
-        exclusions = self._status("exclude_object").get("excluded_objects", [])
-        if exclusions:
-            raise ValueError("Active object exclusion is not supported in Phoenix")
+        objects = self._status("exclude_object")
+        exclusions = list(objects.get("excluded_objects", []) or [])
+        if objects.get("current_object") and objects.get("current_object") in exclusions:
+            # Inside an excluded object the G-code position is virtual; resuming
+            # here would print the excluded object. Earlier checkpoints stay usable.
+            return None
         retract = self.printer.lookup_object("firmware_retraction", None)
         if retract and getattr(retract, "is_retracted", False):
             # Do not record a hidden retract state; existing checkpoints remain usable.
             return None
+        mesh_id, mesh_record = self._mesh_record()
         evidence = capture_motion_evidence(self.printer, self.reactor.monotonic())
         evidence["session_id"] = self.session_id
         return {
@@ -657,10 +744,14 @@ class Phoenix:
             "gcode_state": state, "layer_z": self.layer_z,
             "z_above_layer": (None if self.layer_z is None else
                               self.move.get_status()["gcode_position"][2] - self.layer_z),
-            "position_kind": "commanded_not_measured", "mesh": self._mesh(),
+            "position_kind": "commanded_not_measured", "mesh_id": mesh_id,
+            "_mesh_record": mesh_record,
             "motion_evidence": evidence,
             "extruder_target": extruder.get("target", 0.),
             "bed_target": self._status("heater_bed").get("target", 0.),
+            "heaters": {name.split(" ", 1)[1]: heater.get_status(self.reactor.monotonic()).get("target", 0.)
+                        for name, heater in self.printer.lookup_objects("heater_generic")},
+            "excluded_objects": exclusions,
             "fans": fans,
             "pressure_advance": extruder.get("pressure_advance", 0.),
             "smooth_time": extruder.get("smooth_time", 0.04),
@@ -688,6 +779,20 @@ class Phoenix:
                 self.phase, self.reason = "detected", "print_error"
                 self._event("interrupted")
                 return eventtime + self.interval
+            if stats.get("state") == "paused":
+                # The pause macro parks the head away from the last checkpoint.
+                # A power loss now must start from the paused position.
+                if not self.gcode.get_mutex().test():
+                    position = list(self.toolhead.get_position())
+                    if self.job.get("paused_position") != position:
+                        self.job["paused_position"] = position
+                        self.writer.submit(self.job)
+                return eventtime + self.interval
+            if self.job.get("paused_position") is not None:
+                # Printing again: the head is back at the print. Clear at once,
+                # not only on the next successful checkpoint.
+                self.job["paused_position"] = None
+                self.writer.submit(self.job)
             # Sample only BETWEEN complete virtual-SD commands, never while a macro
             # has yielded mid-command. No reactor yields between this guard and copy.
             if (not self.vsd.is_active() or self.vsd.is_cmd_from_sd()
@@ -697,7 +802,10 @@ class Phoenix:
                 raise ValueError("Virtual-SD source changed without a Phoenix start hook")
             with self.gcode.get_mutex():
                 snapshot = self._snapshot()
+            mesh_record = snapshot.pop("_mesh_record", None) if snapshot else None
             if snapshot and snapshot["offset"] < self.job["file"]["size"]:
+                self._note_max_z(snapshot["machine_position"][2])
+                self.job.setdefault("meshes", {})[snapshot["mesh_id"]] = mesh_record
                 if (not self.job["checkpoints"] or
                         snapshot["offset"] != self.job["checkpoints"][-1]["offset"]):
                     self.job["checkpoints"].append(snapshot)
@@ -711,14 +819,24 @@ class Phoenix:
                     old_motion = older.get("motion_evidence", {})
                     if old_motion.pop("tracks", None) is not None:
                         old_motion["tracks_pruned"] = True
+                used = {point.get("mesh_id") for point in self.job["checkpoints"]}
+                self.job["meshes"] = {key: value for key, value in self.job["meshes"].items()
+                                      if key in used}
                 self.writer.submit(self.job)
         except Exception as exc:
             logging.exception("Phoenix checkpoint failed")
             self._block(str(exc))
         return eventtime + self.interval
 
+    def _note_max_z(self, z):
+        # Highest commanded Z in this job: a finished sequential object may
+        # stand taller than the layer being printed when power failed.
+        if math.isfinite(z) and (self.job.get("max_z") is None or z > self.job["max_z"]):
+            self.job["max_z"] = z
+
     def _finish(self, phase):
         self.active = False
+        self._restore_idle_timeout()
         self.writer.flush()
         self.journal.terminal(phase)
         self.journal.clear_fence()
@@ -805,6 +923,7 @@ class Phoenix:
             self.checks = {key: False for key in CHECKS}
             self._event("recording_started")
             if replace_recovery:
+                self._restore_idle_timeout()
                 self.gcode.respond_raw("// action:prompt_end")
                 gcmd.respond_info("New print started. Previous Phoenix recovery was discarded automatically.")
         except Exception as exc:
@@ -837,7 +956,8 @@ class Phoenix:
                     "gcode_position": p["gcode_position"][:3], "layer_z": p["layer_z"],
                     "z_above_layer": p["z_above_layer"],
                     "extruder_target": p.get("extruder_target"),
-                    "bed_target": p.get("bed_target")}
+                    "bed_target": p.get("bed_target"),
+                    "selectable": self._selectable(points[-1], p)}
                    for index, p in enumerate(reversed(points))]
         demo = copy.deepcopy(self.demo)
         demo["home_xy_available"] = self._demo_home_available()
@@ -862,7 +982,7 @@ class Phoenix:
                 "analysis": self._analysis(),
                 "startup_timing": copy.deepcopy(self.startup_timing),
                 "selected_index": self.selected, "checkpoints": summary,
-                "assumed_position": points[-1]["machine_position"][:3] if points else None,
+                "assumed_position": self._assumed_position()[:3] if points else None,
                 "plan": copy.deepcopy(self.plan),
                 "storage_error": self.writer.error if self.writer else self.error,
                 "journal_fallback": self.journal.fallback if self.journal else False,
@@ -881,7 +1001,7 @@ class Phoenix:
         return {"schema": 1, "confidence": decision, "applicable": bool(points) or self.phase == "blocked",
                 "last_checkpoint": ({"id": latest["id"], "saved_at": latest["saved_at"],
                                      "offset": latest["offset"]} if latest else None),
-                "assumed_position": latest["machine_position"] if latest else None,
+                "assumed_position": self._assumed_position() if latest else None,
                 "estimated_stop_position": None, "physical_error_bounds_mm": None,
                 "stop_time_known": False,
                 "motion_recorded": bool(motion.get("tracks")),
@@ -923,11 +1043,23 @@ class Phoenix:
         points = self.job["checkpoints"]
         if index >= len(points):
             raise gcmd.error("Checkpoint index out of range")
-        if abs(points[-1]["machine_position"][2] - points[-1-index]["machine_position"][2]) > self.max_selection_z_delta:
-            raise gcmd.error("Selected checkpoint is too far away in Z")
+        if not self._selectable(points[-1], points[-1-index]):
+            raise gcmd.error("That point is on a lower layer. Returning there would lower the nozzle "
+                             "into plastic printed later; choose a point on the current layer.")
         self.selected = index
         self.checks = {key: False for key in CHECKS}
         self._event("selection_changed")
+        self._refresh_prompt(gcmd)
+
+    def _selectable(self, latest, point):
+        """Older points must stay on the latest layer (G-code Z, mesh-free)."""
+        if point is latest:
+            return True
+        if abs(latest["machine_position"][2] - point["machine_position"][2]) > self.max_selection_z_delta:
+            return False
+        if latest.get("layer_z") is not None and point.get("layer_z") is not None:
+            return abs(latest["layer_z"] - point["layer_z"]) <= SELECTION_TOLERANCE
+        return point["gcode_position"][2] >= latest["gcode_position"][2] - SELECTION_TOLERANCE
 
     def cmd_CHECK(self, gcmd):
         self._require(gcmd, ("detected",))
@@ -955,7 +1087,11 @@ class Phoenix:
             raise ValueError("Another print is active or paused")
         if self._config_hash() != self.job["config_hash"]:
             raise ValueError("Printer configuration changed since the saved print")
-        self.target = copy.deepcopy(self.job["checkpoints"][-1-self.selected])
+        points = self.job["checkpoints"]
+        if not self._selectable(points[-1], points[-1-self.selected]):
+            raise ValueError("Selected point is on a lower layer; choose a point on the current layer")
+        self.target = copy.deepcopy(points[-1-self.selected])
+        self.target["mesh"] = self._point_mesh(self.target)
         self.source_path = verify_file(self.job["file"], self.vsd.sdcard_dirname,
                                        self.target["offset"])
         expected = set(self._save_gcode_state())
@@ -963,9 +1099,44 @@ class Phoenix:
             raise ValueError("Klipper G-code state format changed; recovery refused")
         if not SAFE_NAME.fullmatch(self.target["mesh"].get("profile_name") or "none"):
             raise ValueError("Mesh profile name must contain only letters, numbers, _, . or -")
+        for name in self.target.get("heaters", {}):
+            if not SAFE_NAME.fullmatch(name):
+                raise ValueError("Unsupported heater name: " + name)
+        excluded = self.target.get("excluded_objects", [])
+        if excluded and self.printer.lookup_object("exclude_object", None) is None:
+            raise ValueError("Recorded excluded objects need [exclude_object]")
+        if any(not OBJECT_NAME.fullmatch(name) for name in excluded):
+            raise ValueError("Excluded object name cannot be restored safely")
+        latest, self.position_source = self._assumed_latest()
         status = self.toolhead.get_status(self.reactor.monotonic())
-        self.plan = recovery_plan(self.job["checkpoints"][-1], self.target, self.clearance,
-                                  self.park, (status["axis_minimum"], status["axis_maximum"]))
+        max_z = self.job.get("max_z")
+        if max_z is None:
+            max_z = max(point["machine_position"][2] for point in points)
+        self.plan = recovery_plan(latest, self.target, self.clearance, self.park,
+                                  (status["axis_minimum"], status["axis_maximum"]), max_z=max_z)
+        self.plan["position_source"] = dict(self.position_source)
+
+    def _assumed_position(self):
+        # Same source PREPARE will use, so interfaces show the real starting point.
+        if self.phase == "detected":
+            return list(self._assumed_latest()[0]["machine_position"])
+        return list(self.job["checkpoints"][-1]["machine_position"])
+
+    def _assumed_latest(self):
+        """Per axis: live position if still homed, else paused, else recorded."""
+        latest = copy.deepcopy(self.job["checkpoints"][-1])
+        source = {axis: "recorded" for axis in "xyz"}
+        paused = self.job.get("paused_position")
+        if paused:
+            latest["machine_position"][:3] = list(paused)[:3]
+            source = {axis: "paused" for axis in "xyz"}
+        homed = self.toolhead.get_status(self.reactor.monotonic()).get("homed_axes", "")
+        live = list(self.toolhead.get_position())
+        for index, axis in enumerate("xyz"):
+            if axis in homed:
+                latest["machine_position"][index] = live[index]
+                source[axis] = "live"
+        return latest, source
 
     def _mesh_matches(self):
         current = self._mesh()
@@ -1003,6 +1174,9 @@ class Phoenix:
                     "raw_probed_matrix": rebuilt.probed_matrix,
                     "raw_mesh_matrix": rebuilt.mesh_matrix,
                 }
+                # 0.4.11 records also carry the rounded status matrices; 0.4.12
+                # stores raw data only. Compare exactly the recorded fields.
+                actual = {key: actual.get(key) for key in saved}
                 if digest(actual) != digest(saved):
                     raise ValueError("Recorded bed mesh could not be reproduced exactly; recovery stopped")
                 mesh.set_mesh(rebuilt)
@@ -1039,7 +1213,12 @@ class Phoenix:
         try:
             self.writer.flush()
             self._validate_recovery()
-            self._restore_mesh()
+            try:
+                self._restore_mesh()
+            except Exception as exc:
+                self.validation_issue = str(exc)
+                raise
+            self._extend_idle_timeout()
             self.journal.fence_motion()
             motion_fenced = True
             self.phase = "preparing"
@@ -1054,24 +1233,44 @@ class Phoenix:
             self._move_machine(self.plan["park"], self.travel_speed)
             self.phase = "prepared"
             self._event("prepared")
-            gcmd.respond_info("Phoenix parked. Clean the blob, heat/purge as needed without moving axes. "
-                              "Then PHOENIX_RESUME CLEANED=1 PATH_CLEAR=1. No Z homing.")
-            if gcmd.get_int("REFRESH", 0):
-                self.cmd_PROMPT(gcmd)
+            gcmd.respond_info("Phoenix parked. Heat with PHOENIX_HEAT, prime with PHOENIX_PRIME LENGTH=10, "
+                              "clean the nozzle without moving axes, then PHOENIX_RESUME CLEANED=1 PATH_CLEAR=1. "
+                              "No Z homing.")
+            if self.plan.get("clearance_reduced"):
+                gcmd.respond_info("Phoenix: Z clearance reduced to %.1f mm by the Z travel limit."
+                                  % self.plan["clearance"])
         except Exception as exc:
             if motion_fenced:
                 self._block(str(exc))
-            raise gcmd.error(str(exc))
+            self.busy = False
+            shown = self.phase == "blocked" or self.validation_issue == str(exc)
+            self._refresh_prompt(gcmd, None if shown else str(exc))
+            raise gcmd.error(self._message(exc))
         finally:
             self.busy = False
+        self._refresh_prompt(gcmd)
+
+    def _message(self, exc):
+        return "Phoenix %s: %s" % (VERSION, exc)
+
+    def _refresh_prompt(self, gcmd, notice=None):
+        if gcmd.get_int("REFRESH", 0):
+            self.notice = notice
+            self.cmd_PROMPT(gcmd)
 
     def _restore_process(self):
         target = self.target
-        if self.printer.lookup_object("heater_bed", None):
+        bed = self.printer.lookup_object("heater_bed", None)
+        if bed:
             self.gcode.run_script_from_command("M140 S%.3f" % target["bed_target"])
-        self.gcode.run_script_from_command("M104 S%.3f" % target["extruder_target"])
-        if self.printer.lookup_object("heater_bed", None) and target["bed_target"]:
+        for name, value in target.get("heaters", {}).items():
+            self.gcode.run_script_from_command("SET_HEATER_TEMPERATURE HEATER=%s TARGET=%.3f" % (name, value))
+        # Bed first: the nozzle must not ooze at park after "cleaned" was confirmed.
+        if bed and target["bed_target"]:
             self.gcode.run_script_from_command("M190 S%.3f" % target["bed_target"])
+            if self.bed_soak:
+                self.gcode.run_script_from_command("G4 P%d" % round(self.bed_soak * 1000.))
+        self.gcode.run_script_from_command("M104 S%.3f" % target["extruder_target"])
         self.gcode.run_script_from_command("M109 S%.3f" % target["extruder_target"])
         self.gcode.run_script_from_command("SET_PRESSURE_ADVANCE ADVANCE=%.9f SMOOTH_TIME=%.9f" %
                                           (target["pressure_advance"], target["smooth_time"]))
@@ -1099,6 +1298,7 @@ class Phoenix:
             raise gcmd.error("Confirm CLEANED=1 PATH_CLEAR=1 before returning to the print")
         self.busy = True
         try:
+            # Refusals here leave the position known: stay prepared, keep the fence.
             verify_file(self.job["file"], self.vsd.sdcard_dirname, self.target["offset"])
             if self.vsd.is_active():
                 raise ValueError("Another print is active")
@@ -1110,7 +1310,14 @@ class Phoenix:
                 raise ValueError("Axes are no longer homed")
             pos = self.toolhead.get_position()
             if any(abs(pos[i] - self.plan["park"][i]) > 0.01 for i in range(3)):
-                raise ValueError("Axes moved from the Phoenix park point; recovery refused")
+                raise ValueError("The toolhead is not at the Phoenix park point (X=%.2f Y=%.2f Z=%.2f). "
+                                 "Move it back to the park point before resuming."
+                                 % tuple(self.plan["park"]))
+        except Exception as exc:
+            self.busy = False
+            self._refresh_prompt(gcmd, str(exc))
+            raise gcmd.error(self._message(exc))
+        try:
             self.phase = "heating"
             self._event("heating")
             self._restore_process()
@@ -1128,6 +1335,10 @@ class Phoenix:
             self.vsd._load_file(gcmd, self.job["file"]["relative_path"], check_subdirs=True)
             self.vsd.file_position = self.target["offset"]
             self.vsd.next_file_position = self.target["offset"]
+            # _reset_file cleared exclude_object state; re-apply recorded exclusions.
+            for name in self.target.get("excluded_objects", []):
+                self.gcode.run_script_from_command("EXCLUDE_OBJECT NAME=%s" % name)
+            self.job["paused_position"] = None
             pause = self.printer.lookup_object("pause_resume", None)
             if pause:
                 self.gcode.run_script_from_command("CLEAR_PAUSE")
@@ -1142,14 +1353,79 @@ class Phoenix:
             self.active, self.phase = True, "recording"
             self.active_file = getattr(self.vsd, "current_file", None)
             self.checks = {key: False for key in CHECKS}
+            self._restore_idle_timeout()
             self.vsd.do_resume()
             self._event("resumed")
             self.gcode.respond_raw("// action:prompt_end")
         except Exception as exc:
             self._block(str(exc))
-            raise gcmd.error(str(exc))
+            self.busy = False
+            self._refresh_prompt(gcmd)
+            raise gcmd.error(self._message(exc))
         finally:
             self.busy = False
+
+    def _heat_point(self):
+        return self.job["checkpoints"][-1-self.selected]
+
+    def cmd_HEAT(self, gcmd):
+        self._require(gcmd, ("detected", "prepared"))
+        point = self._heat_point()
+        bed_on, hotend_on = gcmd.get_int("BED", 1), gcmd.get_int("HOTEND", 1)
+        wait = gcmd.get_int("WAIT", 0)
+        bed = self.printer.lookup_object("heater_bed", None)
+        done = []
+        self.busy = True
+        try:
+            # Heaters may stay on while the user cleans; keep Klipper from cutting motors.
+            self._extend_idle_timeout()
+            if bed_on and bed and point.get("bed_target"):
+                self.gcode.run_script_from_command("M140 S%.3f" % point["bed_target"])
+                done.append("bed %.0f C" % point["bed_target"])
+            if bed_on:
+                for name, value in point.get("heaters", {}).items():
+                    if SAFE_NAME.fullmatch(name) and value:
+                        self.gcode.run_script_from_command(
+                            "SET_HEATER_TEMPERATURE HEATER=%s TARGET=%.3f" % (name, value))
+                        done.append("%s %.0f C" % (name, value))
+            if hotend_on and point.get("extruder_target"):
+                self.gcode.run_script_from_command("M104 S%.3f" % point["extruder_target"])
+                done.append("nozzle %.0f C" % point["extruder_target"])
+            if wait:
+                if bed_on and bed and point.get("bed_target"):
+                    self.gcode.run_script_from_command("M190 S%.3f" % point["bed_target"])
+                if hotend_on and point.get("extruder_target"):
+                    self.gcode.run_script_from_command("M109 S%.3f" % point["extruder_target"])
+        except Exception as exc:
+            self.busy = False
+            self._refresh_prompt(gcmd, str(exc))
+            raise gcmd.error(self._message(exc))
+        finally:
+            self.busy = False
+        gcmd.respond_info("Phoenix: heating to saved temperatures: " + (", ".join(done) or "nothing saved"))
+        self._refresh_prompt(gcmd)
+
+    def cmd_PRIME(self, gcmd):
+        self._require(gcmd, ("prepared",))
+        length = gcmd.get_float("LENGTH", 10.)
+        if not math.isfinite(length) or length == 0 or abs(length) > 50:
+            raise gcmd.error("Choose LENGTH between -50 and 50 mm (negative retracts)")
+        self.busy = True
+        try:
+            # Extruder only; XYZ stay at the park point checked by PHOENIX_RESUME.
+            self.gcode.run_script_from_command("SAVE_GCODE_STATE NAME=__PHOENIX_PRIME")
+            try:
+                self.gcode.run_script_from_command("M83")
+                self.gcode.run_script_from_command("G1 E%.3f F240" % length)
+            finally:
+                self.gcode.run_script_from_command("RESTORE_GCODE_STATE NAME=__PHOENIX_PRIME")
+        except Exception as exc:
+            self.busy = False
+            self._refresh_prompt(gcmd, str(exc))
+            raise gcmd.error(self._message(exc))
+        finally:
+            self.busy = False
+        self._refresh_prompt(gcmd)
 
     def cmd_DISCARD(self, gcmd):
         self._require(gcmd, ("idle", "detected", "blocked", "prepared"))
@@ -1167,24 +1443,77 @@ class Phoenix:
     def cmd_PROMPT(self, gcmd):
         # Standard action:prompt protocol; no separate web server or UI dependency.
         send = lambda value: self.gcode.respond_raw("// action:prompt_" + value)
-        send("begin Phoenix for Klipper")
+        notice, self.notice = self.notice, None
+        if gcmd.get_int("DISCARD", 0) and self.phase in ("detected", "prepared", "blocked"):
+            send("begin Phoenix %s - discard recovery?" % VERSION)
+            send("text Forget this interrupted print. The printer does not move and heater targets are not changed.")
+            send("button Yes, discard recovery|PHOENIX_DISCARD CONFIRM=1|error")
+            send("footer_button Back|PHOENIX_PROMPT|secondary")
+            send("show")
+            return
+        send("begin Phoenix %s - print recovery" % VERSION)
+        if notice:
+            send("text Error: " + notice)
+        discard = "button Discard recovery...|PHOENIX_PROMPT DISCARD=1|error"
         if self.phase == "detected":
-            send("text Interrupted print detected. Power loss or restart may be the cause.")
+            points = self.job["checkpoints"]
+            point = points[-1-self.selected]
+            send("text Interrupted print: %s. Power loss or restart may be the cause."
+                 % self.job.get("file", {}).get("relative_path", "unknown file"))
+            send("text Resume point: X=%.1f Y=%.1f Z=%.2f. Saved temperatures: nozzle %.0f C, bed %.0f C."
+                 % (tuple(point["machine_position"][:3]) + (point.get("extruder_target") or 0.,
+                                                         point.get("bed_target") or 0.)))
+            if self.job.get("paused_position"):
+                send("text The print was paused when it stopped; Phoenix starts from the paused head position.")
             send("text No Z homing. Saved positions are estimates; Z-hop and queued moves may differ.")
             analysis = self._analysis()
             send("text Recovery confidence: " + analysis["confidence"]["class"] + ". Physical position error is unknown; no automatic resume.")
             if analysis["validation_error"]:
                 send("text " + analysis["validation_error"])
+            choices = [i for i in range(len(points)) if self._selectable(points[-1], points[-1-i])][:4]
+            if len(choices) > 1:
+                send("text Resume from (same layer only):")
+                send("button_group_start")
+                for index in choices:
+                    age = points[-1]["saved_at"] - points[-1-index]["saved_at"]
+                    label = "Latest" if index == 0 else "%.0f s earlier" % age
+                    send("button %s%s|PHOENIX_SELECT INDEX=%d REFRESH=1|%s" % (
+                        "[x] " if index == self.selected else "", label, index,
+                        "primary" if index == self.selected else "secondary"))
+                send("button_group_end")
             for key in CHECKS:
                 mark = "[OK] " if self.checks[key] else "[ ] "
                 # Prompt buttons use a single registered command; REFRESH is optional.
                 command = "PHOENIX_CHECK ITEM=%s VALUE=%d REFRESH=1" % (key, not self.checks[key])
                 send("button %s%s|%s|%s" % (mark, CHECK_TEXT[key], command,
                                                "success" if self.checks[key] else "secondary"))
+            send("button Heat bed and nozzle to saved temperatures|PHOENIX_HEAT REFRESH=1|secondary")
+            send(discard)
             send("footer_button Prepare recovery|PHOENIX_PREPARE REFRESH=1|primary")
         elif self.phase == "prepared":
-            send("text Clean the blob and prime filament at the park point. Do not move XYZ.")
-            send("footer_button Cleaned; path clear; resume|PHOENIX_RESUME CLEANED=1 PATH_CLEAR=1|primary")
+            point = self._heat_point()
+            extruder, bed = self._status("extruder"), self._status("heater_bed")
+            send("text Parked. Heat, prime and clean the nozzle here. Do not move XYZ.")
+            line = "Nozzle %.0f / %.0f C (saved %.0f)" % (extruder.get("temperature", 0.), extruder.get("target", 0.),
+                                                        point.get("extruder_target") or 0.)
+            if bed:
+                line += ", bed %.0f / %.0f C (saved %.0f)" % (bed.get("temperature", 0.), bed.get("target", 0.),
+                                                             point.get("bed_target") or 0.)
+            send("text " + line + ". Press Close and reopen PHOENIX_RECOVERY to refresh.")
+            if self.idle_saved is not None:
+                send("text Idle timeout is extended to %.0f min during recovery; heaters stay on. Stay with the printer."
+                     % (self.recovery_idle_timeout / 60.))
+            send("button Heat bed and nozzle to saved temperatures|PHOENIX_HEAT REFRESH=1|primary")
+            send("button_group_start")
+            send("button Extrude 10 mm|PHOENIX_PRIME LENGTH=10 REFRESH=1|secondary")
+            send("button Retract 2 mm|PHOENIX_PRIME LENGTH=-2 REFRESH=1|secondary")
+            send("button_group_end")
+            send("text Resume heats the bed first, then the nozzle, returns and continues.")
+            send(discard)
+            send("footer_button Cleaned; path clear; resume|PHOENIX_RESUME CLEANED=1 PATH_CLEAR=1 REFRESH=1|primary")
+        elif self.phase == "blocked":
+            send("text " + (self.error or "Recovery needs attention."))
+            send(discard)
         else:
             message = self.error or ({"idle": "No interrupted print to recover. Recording starts automatically when you print.",
                                       "recording": "Your print is being recorded. No manual action is needed."}.get(

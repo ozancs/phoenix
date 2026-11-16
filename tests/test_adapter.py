@@ -80,6 +80,7 @@ class GCode:
             self.printer.move.saved_states[params["NAME"]] = copy.deepcopy(self.printer.move.state)
         elif command == "SET_KINEMATIC_POSITION":
             self.printer.toolhead.position[:3] = [float(params[a]) for a in "XYZ"]
+            self.printer.toolhead.homed_axes = "xyz"
         elif command == "RESTORE_GCODE_STATE":
             self.printer.move.restored = copy.deepcopy(self.printer.move.saved_states[params["NAME"]])
         if self.on_command:
@@ -260,6 +261,7 @@ class AdapterTests(unittest.TestCase):
         p.journal.save(p.job)
         p.phase = "detected"
         p.checks = {key: True for key in CHECKS}
+        self.printer.toolhead.homed_axes = ""  # Klipper restarted: nothing homed.
         return p
 
     def test_boot_detection_never_moves_or_heats(self):
@@ -360,14 +362,19 @@ class AdapterTests(unittest.TestCase):
             p.cmd_PREPARE(Command())
         self.assertEqual(self.printer.toolhead.moves, [])
 
-    def test_jog_after_prepare_blocks_resume(self):
+    def test_jog_after_prepare_refuses_resume_but_keeps_recovery(self):
         p = self.interrupted()
         p.cmd_PREPARE(Command())
         self.printer.toolhead.position[0] += 1.
         with self.assertRaisesRegex(ValueError, "park point"):
             p.cmd_RESUME(Command(CLEANED=1, PATH_CLEAR=1))
-        self.assertEqual(p.phase, "blocked")
+        # Position is still known (homed, motors on): refuse, do not destroy recovery.
+        self.assertEqual(p.phase, "prepared")
+        self.assertTrue(p.journal.fence.exists())
         self.assertFalse(self.printer.sd.active)
+        self.printer.toolhead.position[0] -= 1.
+        p.cmd_RESUME(Command(CLEANED=1, PATH_CLEAR=1))
+        self.assertTrue(self.printer.sd.active)
 
     def test_motor_disable_during_heat_prevents_return(self):
         p = self.interrupted()
