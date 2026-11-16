@@ -16,7 +16,7 @@ from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, dige
                            demo_plan, recovery_plan, verify_file, capture_motion_evidence,
                            assess_evidence, run_disk_task, initialize_recording)
 
-VERSION = "0.4.9"
+VERSION = "0.4.10"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
@@ -831,7 +831,9 @@ class Phoenix:
         summary = [{"id": p["id"], "index": index, "saved_at": p["saved_at"],
                     "offset": p["offset"], "machine_position": p["machine_position"][:3],
                     "gcode_position": p["gcode_position"][:3], "layer_z": p["layer_z"],
-                    "z_above_layer": p["z_above_layer"]}
+                    "z_above_layer": p["z_above_layer"],
+                    "extruder_target": p.get("extruder_target"),
+                    "bed_target": p.get("bed_target")}
                    for index, p in enumerate(reversed(points))]
         demo = copy.deepcopy(self.demo)
         demo["home_xy_available"] = self._demo_home_available()

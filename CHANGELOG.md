@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.10 - 2026-11-16
+
+- Share the saved nozzle and bed temperatures with recovery interfaces so they
+  can use the selected print record without asking you to enter temperatures again.
+- Heating remains an explicit action; opening recovery does not enable heaters.
+
 ## 0.4.9 - 2026-11-15
 
 - Discord announcements now include the release notes for the published version.

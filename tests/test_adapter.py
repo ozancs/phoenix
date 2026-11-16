@@ -298,6 +298,21 @@ class AdapterTests(unittest.TestCase):
             p.cmd_PREPARE(Command())
         self.assertEqual(self.printer.toolhead.moves, [])
 
+    def test_status_exposes_each_checkpoint_temperature_without_heating(self):
+        p = self.interrupted()
+        p.job["checkpoints"][0].update(extruder_target=235., bed_target=80.)
+        p.job["checkpoints"][1].update(extruder_target=245., bed_target=85.)
+        before = list(self.printer.gcode.commands)
+        status = p.get_status(100.)
+        self.assertEqual(status["checkpoints"][0]["extruder_target"], 245.)
+        self.assertEqual(status["checkpoints"][1]["extruder_target"], 235.)
+        self.assertEqual(status["checkpoints"][1]["bed_target"], 80.)
+        p.cmd_SELECT(Command(INDEX=1))
+        self.assertEqual(p.get_status(100.)["selected_index"], 1)
+        self.assertEqual(self.printer.gcode.commands, before)
+        del p.job["checkpoints"][0]["extruder_target"]
+        self.assertIsNone(p.get_status(100.)["checkpoints"][1]["extruder_target"])
+
     def test_unreviewed_profile_blocks_motion(self):
         p = self.interrupted()
         p.profile_ready = False
