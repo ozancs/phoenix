@@ -27,6 +27,25 @@ bash scripts/install.sh
 
 The installer previews its changes, backs up your configuration and connects the print hooks and updater. After reconnecting, open **PHOENIX_SETUP_GUIDE** to choose your park point. Then print normally.
 
+## Troubleshooting
+
+**`Section 'phoenix' is not a valid config section` after an update.** Klipper cannot load the Phoenix module. Check the repository:
+
+```sh
+cd ~/phoenix-for-klipper && git log --oneline -1
+```
+
+If this shows `object file ... is empty` or `bad object HEAD`, the local copy was damaged while being written (full disk, power cut right after the update, or a failing SD card). Free disk space if needed (`df -h ~`), then download a fresh copy. Your settings and recovery records are stored separately and are kept:
+
+```sh
+cd ~
+mv phoenix-for-klipper phoenix-for-klipper.broken
+git clone https://github.com/ozancs/phoenix.git phoenix-for-klipper
+sudo systemctl restart moonraker klipper
+```
+
+If `git log` works, run `bash scripts/install.sh` again: it restores the module links in Klipper (for example after Klipper was reinstalled) without changing your settings.
+
 [Setup & updates](docs/SETUP.md) · [Recovery guide](docs/RECOVERY.md) · [Release notes](CHANGELOG.md)
 
 <sub>Licensed under <a href="LICENSE">GPL-3.0-or-later</a>.</sub>
