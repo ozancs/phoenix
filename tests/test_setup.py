@@ -39,6 +39,25 @@ class SetupTests(unittest.TestCase):
         self.assertTrue((backup / "manifest.json").is_file())
         self.assertEqual(plan_config(self.config, origin=SSH_ORIGIN)[0], {})
 
+    def test_duplicate_macro_uses_last_gcode_in_include_order(self):
+        path = self.config / "printer.cfg"
+        path.write_text(path.read_text() +
+                        "[gcode_macro PRINT_END]\ngcode:\n    M84\n"
+                        "[include variables.cfg]\n")
+        (self.config / "variables.cfg").write_text(
+            "[gcode_macro PRINT_END]\nvariable_done: 0\n")
+        self.apply()
+        self.assertIn("PHOENIX_END", path.read_text())
+        self.assertNotIn("PHOENIX_END", (self.config / "macros.cfg").read_text())
+        self.assertEqual(plan_config(self.config)[0], {})
+
+    def test_later_include_overrides_parent_macro(self):
+        path = self.config / "printer.cfg"
+        path.write_text("[gcode_macro PRINT_END]\ngcode:\n    M84\n" + path.read_text())
+        self.apply()
+        self.assertNotIn("PHOENIX_END", path.read_text())
+        self.assertIn("PHOENIX_END", (self.config / "macros.cfg").read_text())
+
     def test_existing_force_option_merged_in_included_file(self):
         path = self.config / "macros.cfg"
         path.write_text(path.read_text() + "\n[force_move]\nenable_force_move: False # keep this comment\n")

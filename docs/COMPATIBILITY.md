@@ -7,7 +7,7 @@ Phoenix is experimental software for **single-extruder Cartesian and CoreXY prin
 - A part that remains attached to the same build plate after the interruption.
 - Axes that have not moved while power was off. Phoenix cannot measure this for you.
 - A clear lifting, parking and return route, with enough Z clearance.
-- If bed mesh is used, a named profile already saved persistently that reloads identically. Adaptive or unsaved meshes cannot currently be restored reliably.
+- If bed mesh is used, Phoenix 0.4.11 and later record the complete mesh, including adaptive meshes, and restore it without probing. Older recovery records still require their original saved profile.
 
 Setup checks the configuration and helps you save a park point. It cannot certify that the route is clear of a printed part, clips or other obstacles.
 

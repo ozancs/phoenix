@@ -38,8 +38,6 @@ class ConfigTree:
         path = path.resolve()
         if path in stack:
             raise ValueError("Include cycle: " + str(path))
-        if path in self.text:
-            raise ValueError("Config included more than once: " + str(path))
         data = path.read_bytes().decode("utf-8")
         self.original[path] = data
         self.text[path] = data.replace("\r\n", "\n")
@@ -64,6 +62,30 @@ class ConfigTree:
                     end = headers[index+1].start() if index+1 < len(headers) else len(body)
                     found.append((path, match.end(), end))
         return found
+
+    def macro_body(self, name):
+        """Find the effective gcode option in Klipper include expansion order."""
+        found = []
+
+        def visit(path):
+            body = self.text[path].split(AUTOSAVE)[0]
+            headers = list(HEADER.finditer(body))
+            for index, match in enumerate(headers):
+                section = match[1].strip()
+                end = headers[index+1].start() if index+1 < len(headers) else len(body)
+                if section.lower().startswith("include "):
+                    pattern = str(path.parent / section[8:].strip())
+                    children = {Path(child).resolve() for child in glob.glob(pattern)}
+                    children.update(child for child in self.text
+                                    if not child.exists() and fnmatch.fnmatch(str(child), pattern))
+                    for child in sorted(children):
+                        if child in self.text:
+                            visit(child)
+                elif section.lower() == ("gcode_macro " + name).lower():
+                    if re.search(r"^[ \t]*gcode\s*:", body[match.end():end], re.M):
+                        found.append((path, match.end(), end))
+        visit(self.main)
+        return found[-1] if found else None
 
     def one(self, name):
         matches = self.sections(name)
@@ -97,7 +119,7 @@ class ConfigTree:
         self.text[path] = self.text[path][:start] + block + self.text[path][end:]
 
     def hook(self, macro, command, at_start):
-        path, start, end = self.one("gcode_macro " + macro)
+        path, start, end = self.macro_body(macro)
         block = self.text[path][start:end]
         if re.search(r"^\s*" + command + r"(?:\s|$)", block, re.M):
             return False
@@ -163,8 +185,8 @@ def plan_config(config_dir, repo=ROOT, origin=HTTPS_ORIGIN, start_macro=None, en
     for command, chosen, candidates, first in (
             ("PHOENIX_START", start_macro, ("PRINT_START", "START_PRINT"), False),
             ("PHOENIX_END", end_macro, ("PRINT_END", "END_PRINT"), True)):
-        names = [chosen] if chosen else [name for name in candidates if tree.one("gcode_macro " + name)]
-        if len(names) == 1 and tree.one("gcode_macro " + names[0]):
+        names = [chosen] if chosen else [name for name in candidates if tree.macro_body(name)]
+        if len(names) == 1 and tree.macro_body(names[0]):
             added = tree.hook(names[0], command, first)
             notes.append(("ADD " if added else "OK  ") + command + " in " + names[0])
         elif chosen:

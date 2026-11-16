@@ -16,7 +16,7 @@ from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, dige
                            demo_plan, recovery_plan, verify_file, capture_motion_evidence,
                            assess_evidence, run_disk_task, initialize_recording)
 
-VERSION = "0.4.10"
+VERSION = "0.4.11"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 CHECKS = ("bed_attached", "axes_unmoved", "plate_unmoved", "nozzle_free",
           "path_clear", "uncertainty_accepted")
@@ -621,6 +621,10 @@ class Phoenix:
         z_mesh = getattr(mesh, "z_mesh", None)
         if z_mesh and any(getattr(z_mesh, "mesh_offsets", [0., 0.])):
             raise ValueError("Runtime mesh XY offsets are not supported in Phoenix")
+        if z_mesh:
+            result["mesh_params"] = copy.deepcopy(z_mesh.get_mesh_params())
+            result["raw_probed_matrix"] = copy.deepcopy(z_mesh.probed_matrix)
+            result["raw_mesh_matrix"] = copy.deepcopy(z_mesh.mesh_matrix)
         return result
 
     def _save_gcode_state(self):
@@ -963,15 +967,54 @@ class Phoenix:
         self.plan = recovery_plan(self.job["checkpoints"][-1], self.target, self.clearance,
                                   self.park, (status["axis_minimum"], status["axis_maximum"]))
 
+    def _mesh_matches(self):
+        current = self._mesh()
+        saved = self.target["mesh"]
+        return digest({key: current.get(key) for key in saved}) == digest(saved)
+
     def _restore_mesh(self):
         mesh = self.printer.lookup_object("bed_mesh", None)
+        saved = self.target["mesh"]
         if mesh:
-            profile = self.target["mesh"].get("profile_name")
-            if profile:
+            profile = saved.get("profile_name")
+            params = saved.get("mesh_params")
+            if params:
+                # Rebuild the recorded grid in memory; never probe or SAVE_CONFIG.
+                from .bed_mesh import ZMesh
+                rebuilt = ZMesh(copy.deepcopy(params), profile)
+                points = saved["raw_probed_matrix"]
+                grid = saved["raw_mesh_matrix"]
+                for matrix, rows, cols in (
+                        (points, params["y_count"], params["x_count"]),
+                        (grid, rebuilt.mesh_y_count, rebuilt.mesh_x_count)):
+                    if (len(matrix) != rows or any(len(row) != cols for row in matrix)
+                            or any(not math.isfinite(v) for row in matrix for v in row)):
+                        raise ValueError("Recorded bed mesh grid is invalid; recovery stopped")
+                rebuilt.build_mesh(copy.deepcopy(points))
+                # Preserve zero-reference adjustment and full precision as recorded.
+                rebuilt.mesh_matrix = copy.deepcopy(grid)
+                actual = {
+                    "profile_name": rebuilt.get_profile_name(),
+                    "mesh_min": [params["min_x"], params["min_y"]],
+                    "mesh_max": [params["max_x"], params["max_y"]],
+                    "probed_matrix": rebuilt.get_probed_matrix(),
+                    "mesh_matrix": rebuilt.get_mesh_matrix(),
+                    "mesh_params": rebuilt.get_mesh_params(),
+                    "raw_probed_matrix": rebuilt.probed_matrix,
+                    "raw_mesh_matrix": rebuilt.mesh_matrix,
+                }
+                if digest(actual) != digest(saved):
+                    raise ValueError("Recorded bed mesh could not be reproduced exactly; recovery stopped")
+                mesh.set_mesh(rebuilt)
+            elif profile:
+                if profile not in self._status("bed_mesh").get("profiles", {}):
+                    raise ValueError("This older recovery record needs a bed mesh profile that "
+                                     "was lost on restart. It cannot be restored safely. "
+                                     "New prints record the complete mesh; do not probe over this print.")
                 self.gcode.run_script_from_command("BED_MESH_PROFILE LOAD=" + profile)
             else:
                 self.gcode.run_script_from_command("BED_MESH_CLEAR")
-        if digest(self._mesh()) != digest(self.target["mesh"]):
+        if not self._mesh_matches():
             raise ValueError("Saved bed mesh is unavailable or changed; do not re-probe over the print")
 
     def _move_machine(self, xyz, speed):
@@ -1061,7 +1104,7 @@ class Phoenix:
                 raise ValueError("Another print is active")
             if self._config_hash() != self.job["config_hash"]:
                 raise ValueError("Configuration changed during preparation")
-            if digest(self._mesh()) != digest(self.target["mesh"]):
+            if not self._mesh_matches():
                 raise ValueError("Mesh changed during preparation")
             if "xyz" != self.toolhead.get_status(self.reactor.monotonic())["homed_axes"]:
                 raise ValueError("Axes are no longer homed")

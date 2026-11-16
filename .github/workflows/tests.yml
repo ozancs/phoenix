@@ -34,6 +34,7 @@ jobs:
           repository: mikeoverbay/klipper-power-loss-recovery
           ref: 4f6c2b457d134962522d726b1d754be703953288
           path: runtime/competitor
+      - run: python -m unittest discover -s tests -p test_mesh_restore.py -v
       - run: python -m research.simulate --klipper runtime/klipper --competitor runtime/competitor --cases 6600 --output runtime/results
       - uses: actions/upload-artifact@v4
         with:

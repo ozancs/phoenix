@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.11 - 2026-11-16
+
+- Restore adaptive and unsaved bed meshes from complete recovery records without probing.
+- Explain when an older record lacks the mesh needed after a restart.
+- Install print hooks into the effective macro body when configuration files override the same macro.
+
 ## 0.4.10 - 2026-11-16
 
 - Share the saved nozzle and bed temperatures with recovery interfaces so they
