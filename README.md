@@ -10,6 +10,25 @@ Use the guided recovery screens in [Voyager](https://github.com/ozancs/voyager-u
 
 Recovery gives you time to check that the part is still attached and the axes have not moved, then clean and prime the nozzle at your chosen park point. Phoenix reheats and returns when you confirm. It never homes Z during recovery and never starts moving or heating just because the printer has restarted.
 
+## Recovery screens
+
+**Voyager** opens a guided recovery window when an interrupted print is found:
+
+![Voyager print recovery window: interrupted print, resume point, checklist, lift and park, clean and prime, resume](docs/images/voyager-recovery.gif)
+
+<sub>Voyager demo with example data. This window is part of Voyager; other interfaces do not show it.</sub>
+
+**Mainsail, Fluidd and KlipperScreen** use Phoenix through console commands. Run `PHOENIX_RECOVERY` and Phoenix opens a pop-up with the same checklist and buttons for heating, parking, priming, resuming and discarding. Each step is also a command:
+
+| Step | Command |
+|---|---|
+| Open recovery | `PHOENIX_RECOVERY` |
+| Heat bed and nozzle to the saved temperatures | `PHOENIX_HEAT` |
+| Lift and park (after the checklist in the pop-up) | `PHOENIX_PREPARE` |
+| Prime or retract at the park point | `PHOENIX_PRIME LENGTH=10` / `PHOENIX_PRIME LENGTH=-2` |
+| Resume the print | `PHOENIX_RESUME CLEANED=1 PATH_CLEAR=1` |
+| Forget the interrupted print | `PHOENIX_DISCARD CONFIRM=1` |
+
 Want to see the flow first? Run **PHOENIX_DEMO** on an empty bed. It moves through a practice recovery without heating or extruding, using the part fan to signal the simulated warm-up. [Try the demo →](docs/DEMO.md)
 
 Phoenix is **experimental**. It cannot measure the exact stopping position: queued moves, Z-hop and movement while unpowered can affect alignment. Recovery may leave a seam or fail, so start with a small supervised test. Currently for single-extruder Cartesian and CoreXY printers; [check compatibility before installing](docs/COMPATIBILITY.md).
