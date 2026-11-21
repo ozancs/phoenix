@@ -46,6 +46,15 @@ bash scripts/install.sh
 
 The installer previews its changes, backs up your configuration and connects the print hooks and updater. After reconnecting, open **PHOENIX_SETUP_GUIDE** to choose your park point. Then print normally.
 
+### Uninstall
+
+```sh
+cd ~/phoenix-for-klipper
+bash scripts/uninstall.sh
+```
+
+It removes the Phoenix module links from Klipper and keeps your configuration and recovery records. Then remove the `phoenix.cfg` include and the Phoenix slicer commands, and restart Klipper.
+
 ## Troubleshooting
 
 **`Section 'phoenix' is not a valid config section` after an update.** Klipper cannot load the Phoenix module. Check the repository:
