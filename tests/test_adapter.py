@@ -93,6 +93,9 @@ class Move:
         self.state = snapshot()["gcode_state"]
         self.restored = None
 
+    def cmd_SAVE_GCODE_STATE(self, gcmd):
+        self.saved_states[gcmd.get("NAME", "default")] = copy.deepcopy(self.state)
+
     def get_status(self, *args):
         return {"gcode_position": self.state["last_position"]}
 

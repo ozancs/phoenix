@@ -16,7 +16,7 @@ from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, dige
                            demo_plan, recovery_plan, verify_file, capture_motion_evidence,
                            assess_evidence, run_disk_task, initialize_recording)
 
-VERSION = "0.4.13"
+VERSION = "0.4.14"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 OBJECT_NAME = re.compile(r"^[^\s=|;]+$")
 STARTUP_MOTION = re.compile(r"\b(G28|BED_MESH_CALIBRATE|QUAD_GANTRY_LEVEL|Z_TILT_ADJUST|PROBE)\b", re.I)
@@ -83,7 +83,7 @@ class Phoenix:
         for name in ("START", "END", "STATUS", "SELECT", "CHECK", "PREPARE",
                      "RESUME", "DISCARD", "PROMPT", "LAYER", "SETUP",
                      "SETUP_PROFILE", "SETUP_SLICER", "DEMO", "ANALYZE", "HEAT", "PRIME"):
-            self.gcode.register_command("PHOENIX_" + name, getattr(self, "cmd_" + name),
+            self.gcode.register_command("PHOENIX_" + name, self._print_safe_command(name, getattr(self, "cmd_" + name)),
                                         desc={"SETUP": "Set up Phoenix or change the park point",
                                               "HEAT": "Heat bed and nozzle to the saved print temperatures",
                                               "PRIME": "Extrude (or retract) at the recovery park point",
@@ -93,11 +93,41 @@ class Phoenix:
                                               "START": "Automatic print-start hook; not a manual action",
                                               "END": "Automatic print-end hook; not a manual action"}.get(name))
         for name in ("SETUP_HOME", "SETUP_JOG", "DEMO_START", "DEMO_CHECK", "DEMO_RECOVER", "DEMO_EXIT"):
-            self.gcode.register_command("_PHOENIX_" + name, getattr(self, "cmd_" + name))
+            self.gcode.register_command("_PHOENIX_" + name,
+                                        self._print_safe_command(name, getattr(self, "cmd_" + name)))
         self.printer.register_event_handler("klippy:ready", self._ready)
         self.printer.register_event_handler("klippy:shutdown", self._shutdown)
         self.printer.register_event_handler("stepper_enable:motor_off", self._motor_off)
         self.printer.register_event_handler("homing:home_rails_begin", self._homing_begin)
+
+    def _safe_notice(self, message):
+        try:
+            self.gcode.respond_info(message)
+        except Exception:
+            logging.exception("Phoenix notification failed")
+
+    def _print_in_progress(self):
+        # An unavailable status provider must not turn a Phoenix UI command
+        # into an unguarded heater or movement command.
+        try:
+            return (self.active or self.vsd.is_active() or self.vsd.is_cmd_from_sd()
+                    or self._status("print_stats").get("state") in ("printing", "paused"))
+        except Exception:
+            return True
+
+    def _print_safe_command(self, name, handler):
+        def dispatch(gcmd):
+            printing = self._print_in_progress()
+            if printing and name not in ("START", "END", "LAYER", "STATUS", "ANALYZE", "CLOSE_PROMPT"):
+                self._safe_notice("Phoenix: %s is unavailable during a print. Printing is unchanged." % name)
+                return
+            try:
+                return handler(gcmd)
+            except Exception as exc:
+                if not printing:
+                    raise
+                self._disable_recording(str(exc))
+        return dispatch
 
     def _ready(self):
         self.toolhead = self.printer.lookup_object("toolhead")
@@ -137,13 +167,32 @@ class Phoenix:
         self.active = False
         self.shutdown_seen = True
 
+    def _normal_print_event(self):
+        # A newly submitted file may home before reaching PHOENIX_START. Old
+        # recovery/demo guards must not reject that normal startup homing.
+        try:
+            if not self.vsd.is_cmd_from_sd():
+                return False
+            if self.phase in ("detected", "preparing", "prepared", "heating", "returning"):
+                self._finish("discarded")
+            if self.demo["phase"] != "off":
+                self.demo = {"phase": "off"}
+            return True
+        except Exception as exc:
+            self._disable_recording(str(exc))
+            return True
+
     def _motor_off(self, *args):
+        if self._normal_print_event():
+            return
         if self.demo["phase"] not in ("off", "ready", "complete"):
             self.demo.update(phase="blocked", error="Motors were disabled. Exit the demo and home again.")
         if self.phase in ("preparing", "prepared", "heating", "returning"):
             self._block("Motors were disabled during recovery; position is no longer trusted.")
 
     def _homing_begin(self, homing_state, rails):
+        if self._normal_print_event():
+            return
         if self.demo["phase"] == "homing":
             if 2 in homing_state.get_axes():
                 self.demo.update(phase="blocked", error="Demo recovery must not home Z.")
@@ -714,7 +763,11 @@ class Phoenix:
         return copy.deepcopy(point["mesh"])
 
     def _save_gcode_state(self):
-        self.gcode.run_script_from_command("SAVE_GCODE_STATE NAME=__PHOENIX_CAPTURE")
+        # Capture directly, avoiding G-code dispatch and its command-error events.
+        command = self.gcode.create_gcode_command(
+            "SAVE_GCODE_STATE", "SAVE_GCODE_STATE NAME=__PHOENIX_CAPTURE",
+            {"NAME": "__PHOENIX_CAPTURE"})
+        self.move.cmd_SAVE_GCODE_STATE(command)
         return copy.deepcopy(self.move.saved_states["__PHOENIX_CAPTURE"])
 
     def _snapshot(self):
@@ -841,9 +894,11 @@ class Phoenix:
     def _finish(self, phase):
         self.active = False
         self._restore_idle_timeout()
-        self.writer.flush()
-        self.journal.terminal(phase)
-        self.journal.clear_fence()
+        def close_record():
+            self.writer.flush()
+            self.journal.terminal(phase)
+            self.journal.clear_fence()
+        run_disk_task(self.reactor, close_record)
         self.phase, self.job = "idle", None
         self.validation_issue = None
         self._event(phase)
@@ -873,12 +928,15 @@ class Phoenix:
     def _disable_recording(self, message):
         """Phoenix failure must not cancel the user's virtual-SD print."""
         self.active = False
-        self._restore_idle_timeout()
         self.phase, self.reason = "blocked", "recovery_off"
         self.error = "Phoenix: recovery off for this print. " + str(message)
         self.recovery_off_file = self.active_file = getattr(self.vsd, "current_file", None)
         self.job, self.plan, self.selected = None, None, 0
         self.checks = {key: False for key in CHECKS}
+        try:
+            self._restore_idle_timeout()
+        except Exception:
+            logging.exception("Phoenix idle timeout restoration failed")
         # Close BOTH journal generations, including any previous print. Disk work
         # yields to Klipper's reactor and a storage failure stays non-fatal.
         def close_record():
@@ -894,8 +952,11 @@ class Phoenix:
         except Exception as exc:
             logging.exception("Phoenix could not invalidate recovery journal")
             self.error += " Recovery storage could not be cleared: " + str(exc)
-        self._event("recovery_disabled")
-        self.gcode.respond_info(self.error + " Phoenix has not cancelled the print.")
+        try:
+            self._event("recovery_disabled")
+        except Exception:
+            logging.exception("Phoenix status notification failed")
+        self._safe_notice(self.error + " Phoenix has not cancelled the print.")
 
     def _install_runtime_guards(self):
         # Keep Klipper's original dispatch handlers, including macro wrappers.
@@ -905,16 +966,19 @@ class Phoenix:
         if mux:
             for name, handler in list(mux[1].items()):
                 def manual(gcmd, original=handler, stepper=name):
-                    changes_state = (any(gcmd.get(key, None) is not None
-                                         for key in ("MOVE", "SET_POSITION"))
-                                     or bool(gcmd.get("GCODE_AXIS", None)))
-                    if changes_state and (self.active or self.vsd.is_cmd_from_sd()
-                                          or self._status("print_stats").get("state")
-                                          in ("printing", "paused")):
-                        self.manual_used_file = getattr(self.vsd, "current_file", None)
-                        if self.active:
-                            self._disable_recording("Manual stepper %s used; its state cannot be restored."
-                                                    % stepper)
+                    try:
+                        changes_state = (any(gcmd.get(key, None) is not None
+                                             for key in ("MOVE", "SET_POSITION"))
+                                         or bool(gcmd.get("GCODE_AXIS", None)))
+                        if changes_state and (self.active or self.vsd.is_cmd_from_sd()
+                                              or self._status("print_stats").get("state")
+                                              in ("printing", "paused")):
+                            self.manual_used_file = getattr(self.vsd, "current_file", None)
+                            if self.active:
+                                self._disable_recording("Manual stepper %s used; its state cannot be restored."
+                                                        % stepper)
+                    except Exception as exc:
+                        self._disable_recording(str(exc))
                     return original(gcmd)
                 mux[1][name] = manual
         handlers = getattr(self.gcode, "ready_gcode_handlers", {})
@@ -927,7 +991,7 @@ class Phoenix:
                 if self.active:
                     try:
                         self._compatible()
-                    except ValueError as exc:
+                    except Exception as exc:
                         self._disable_recording(str(exc))
                 return result
             handlers[name] = skew
@@ -1034,13 +1098,19 @@ class Phoenix:
             return
         if self.active:
             try:
-                self.toolhead.wait_moves()
                 self._finish("complete")
             except Exception as exc:
                 self._disable_recording(str(exc))
 
     def cmd_LAYER(self, gcmd):
-        self.layer_z = gcmd.get_float("Z", minval=0.)
+        try:
+            z = gcmd.get_float("Z", minval=0.)
+            if not math.isfinite(z) or z < 0.:
+                raise ValueError("Layer Z must be a finite non-negative number")
+            self.layer_z = z
+        except Exception as exc:
+            self.layer_z = None
+            self._disable_recording("Invalid PHOENIX_LAYER: " + str(exc))
 
     def get_status(self, eventtime):
         points = self.job.get("checkpoints", []) if self.job else []
@@ -1618,6 +1688,6 @@ class Phoenix:
 
 def load_config(config):
     phoenix = Phoenix(config)
-    phoenix.gcode.register_command("PHOENIX_CLOSE_PROMPT",
-                                  lambda gcmd: phoenix.gcode.respond_raw("// action:prompt_end"))
+    phoenix.gcode.register_command("PHOENIX_CLOSE_PROMPT", phoenix._print_safe_command(
+        "CLOSE_PROMPT", lambda gcmd: phoenix.gcode.respond_raw("// action:prompt_end")))
     return phoenix

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.14 - 2026-11-25
+
+- Invalid layer-hook parameters disable recovery without interrupting the print.
+- Phoenix setup, demo and recovery controls are ignored during a running print.
+- Secondary notification and cleanup errors cannot escape the recording error handler. Auxiliary command observers preserve the original command and its safety errors.
+- Print-end disk writes run outside the motion reactor and no longer wait for queued motion.
+- Starting a new print retires an old parked recovery before startup homing. Actual recovery still forbids Z homing.
+- Checkpoint capture reads G-code state directly without dispatching a G-code command.
+
 ## 0.4.13 - 2026-11-25
 
 - An unused auxiliary manual stepper no longer prevents printing or recovery recording.
