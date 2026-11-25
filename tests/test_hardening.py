@@ -1,8 +1,9 @@
 """0.4.12 recovery hardening: each test fails on 0.4.11 behaviour."""
+import re
 import unittest
 from types import SimpleNamespace
 
-from klippy.extras.phoenix import CHECKS, Phoenix
+from klippy.extras.phoenix import CHECKS, Phoenix, VERSION
 import test_adapter
 from test_adapter import Command
 from test_core import snapshot
@@ -197,7 +198,7 @@ class RecoveryHardeningTests(unittest.TestCase):
     def test_prepare_error_reopens_prompt_with_message(self):
         p = self.interrupted()
         p.job["file"]["sha256"] = "0" * 64
-        with self.assertRaisesRegex(ValueError, "Phoenix 0.4.12: G-code file changed"):
+        with self.assertRaisesRegex(ValueError, re.escape("Phoenix %s: G-code file changed" % VERSION)):
             p.cmd_PREPARE(Command(REFRESH=1))
         self.assertIn("// action:prompt_text G-code file changed; recovery refused", self.printer.gcode.lines)
         self.assertTrue(any("Discard recovery" in line for line in self.printer.gcode.lines))

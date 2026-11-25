@@ -16,7 +16,7 @@ from .phoenix_core import (Journal, JournalWriter, atomic_write, canonical, dige
                            demo_plan, recovery_plan, verify_file, capture_motion_evidence,
                            assess_evidence, run_disk_task, initialize_recording)
 
-VERSION = "0.4.12"
+VERSION = "0.4.13"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 OBJECT_NAME = re.compile(r"^[^\s=|;]+$")
 STARTUP_MOTION = re.compile(r"\b(G28|BED_MESH_CALIBRATE|QUAD_GANTRY_LEVEL|Z_TILT_ADJUST|PROBE)\b", re.I)
@@ -61,6 +61,8 @@ class Phoenix:
         self.move = self.printer.load_object(config, "gcode_move")
         self.active = False
         self.active_file = None
+        self.recovery_off_file = None
+        self.manual_used_file = None
         self.phase = "idle"
         self.reason = ""
         self.job = None
@@ -100,6 +102,7 @@ class Phoenix:
     def _ready(self):
         self.toolhead = self.printer.lookup_object("toolhead")
         self.configfile = self.printer.lookup_object("configfile")
+        self._install_runtime_guards()
         self._load_setup_profile()
         try:
             self.journal = Journal(self.directory)
@@ -764,6 +767,7 @@ class Phoenix:
         try:
             if not self.active:
                 return eventtime + self.interval
+            self._compatible()
             if self.writer.error:
                 raise ValueError("Storage failed: " + self.writer.error)
             stats = self._status("print_stats")
@@ -825,7 +829,7 @@ class Phoenix:
                 self.writer.submit(self.job)
         except Exception as exc:
             logging.exception("Phoenix checkpoint failed")
-            self._block(str(exc))
+            self._disable_recording(str(exc))
         return eventtime + self.interval
 
     def _note_max_z(self, z):
@@ -866,19 +870,104 @@ class Phoenix:
         if not self.writer:
             raise gcmd.error(self.error or "Phoenix is not ready")
 
+    def _disable_recording(self, message):
+        """Phoenix failure must not cancel the user's virtual-SD print."""
+        self.active = False
+        self._restore_idle_timeout()
+        self.phase, self.reason = "blocked", "recovery_off"
+        self.error = "Phoenix: recovery off for this print. " + str(message)
+        self.recovery_off_file = self.active_file = getattr(self.vsd, "current_file", None)
+        self.job, self.plan, self.selected = None, None, 0
+        self.checks = {key: False for key in CHECKS}
+        # Close BOTH journal generations, including any previous print. Disk work
+        # yields to Klipper's reactor and a storage failure stays non-fatal.
+        def close_record():
+            try:
+                if self.writer:
+                    self.writer.flush()
+            finally:
+                if self.journal:
+                    self.journal.terminal("recovery_off")
+                    self.journal.clear_fence()
+        try:
+            run_disk_task(self.reactor, close_record)
+        except Exception as exc:
+            logging.exception("Phoenix could not invalidate recovery journal")
+            self.error += " Recovery storage could not be cleared: " + str(exc)
+        self._event("recovery_disabled")
+        self.gcode.respond_info(self.error + " Phoenix has not cancelled the print.")
+
+    def _install_runtime_guards(self):
+        # Keep Klipper's original dispatch handlers, including macro wrappers.
+        # Observe use between samples so enabling then clearing a transform
+        # cannot leave apparently valid checkpoints from an unsupported print.
+        mux = getattr(self.gcode, "mux_commands", {}).get("MANUAL_STEPPER")
+        if mux:
+            for name, handler in list(mux[1].items()):
+                def manual(gcmd, original=handler, stepper=name):
+                    changes_state = (any(gcmd.get(key, None) is not None
+                                         for key in ("MOVE", "SET_POSITION"))
+                                     or bool(gcmd.get("GCODE_AXIS", None)))
+                    if changes_state and (self.active or self.vsd.is_cmd_from_sd()
+                                          or self._status("print_stats").get("state")
+                                          in ("printing", "paused")):
+                        self.manual_used_file = getattr(self.vsd, "current_file", None)
+                        if self.active:
+                            self._disable_recording("Manual stepper %s used; its state cannot be restored."
+                                                    % stepper)
+                    return original(gcmd)
+                mux[1][name] = manual
+        handlers = getattr(self.gcode, "ready_gcode_handlers", {})
+        for name in ("SET_SKEW", "SKEW_PROFILE"):
+            original = handlers.get(name)
+            if original is None:
+                continue
+            def skew(gcmd, handler=original):
+                result = handler(gcmd)
+                if self.active:
+                    try:
+                        self._compatible()
+                    except ValueError as exc:
+                        self._disable_recording(str(exc))
+                return result
+            handlers[name] = skew
+
     def _compatible(self):
         settings = self._settings()
         if settings.get("printer", {}).get("kinematics") not in ("cartesian", "corexy"):
             raise ValueError("Phoenix supports Cartesian and CoreXY printers")
-        unsupported = ("dual_carriage", "skew_correction", "z_thermal_adjust", "bed_tilt",
-                       "bed_mesh_offset", "extruder1", "manual_stepper")
+        unsupported = ("dual_carriage", "z_thermal_adjust", "bed_tilt",
+                       "bed_mesh_offset", "extruder1")
         for section in settings:
             if any(section == key or section.startswith(key + " ") for key in unsupported):
                 raise ValueError("Unsupported recovery configuration: " + section)
+        skew = self.printer.lookup_object("skew_correction", None)
+        if skew is not None and any(getattr(skew, axis + "_factor", 0.) != 0.
+                                    for axis in ("xy", "xz", "yz")):
+            raise ValueError("Active skew correction cannot be restored")
+        for name, stepper in self.printer.lookup_objects("manual_stepper"):
+            if getattr(stepper, "axis_gcode_id", None) is not None:
+                raise ValueError("Manual stepper linked to GCODE_AXIS: " + name)
+        if len(self.toolhead.get_position()) != 4:
+            raise ValueError("Additional toolhead axes cannot be restored")
+        current = getattr(self.vsd, "current_file", None)
+        if current is not None and current is self.manual_used_file:
+            raise ValueError("Manual stepper used in this print; its state cannot be restored")
         if not settings.get("force_move", {}).get("enable_force_move", False):
             raise ValueError("Enable [force_move] enable_force_move: True for explicit recovery")
 
     def cmd_START(self, gcmd):
+        if not self.vsd.is_cmd_from_sd() or not self.vsd.file_path():
+            raise gcmd.error("PHOENIX_START must run inside a virtual-SD print")
+        current = getattr(self.vsd, "current_file", None)
+        if current is not None and current is self.recovery_off_file:
+            return
+        try:
+            self._start_recording(gcmd)
+        except Exception as exc:
+            self._disable_recording(str(exc))
+
+    def _start_recording(self, gcmd):
         if not self.vsd.is_cmd_from_sd() or not self.vsd.file_path():
             raise gcmd.error("PHOENIX_START must run inside a virtual-SD print")
         if self.busy or self.demo["phase"] != "off":
@@ -939,12 +1028,16 @@ class Phoenix:
             logging.info("Phoenix startup timing: %s", json.dumps(timings, sort_keys=True))
 
     def cmd_END(self, gcmd):
+        if self.reason == "recovery_off":
+            self.phase = "idle"
+            self._event("complete")
+            return
         if self.active:
             try:
                 self.toolhead.wait_moves()
                 self._finish("complete")
             except Exception as exc:
-                raise gcmd.error(str(exc))
+                self._disable_recording(str(exc))
 
     def cmd_LAYER(self, gcmd):
         self.layer_z = gcmd.get_float("Z", minval=0.)

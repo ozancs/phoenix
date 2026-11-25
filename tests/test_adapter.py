@@ -597,17 +597,147 @@ class AdapterTests(unittest.TestCase):
         p = self.interrupted()
         p.active_file = self.printer.sd.current_file
         self.printer.sd.from_sd = True
-        with self.assertRaises(ValueError):
-            p.cmd_START(Command())
-        self.assertEqual(p.job["id"], "job1")
+        p.cmd_START(Command())
+        self.assertFalse(p.active)
+        self.assertEqual(p.reason, "recovery_off")
 
-    def test_invalid_new_print_preserves_previous_recovery(self):
+    def test_invalid_new_print_disables_recovery_without_cancelling(self):
         p = self.interrupted()
         self.printer.sd.from_sd = True
         self.printer.settings["printer"]["kinematics"] = "delta"
-        with self.assertRaises(ValueError):
-            p.cmd_START(Command())
-        self.assertEqual(p.journal.load()["id"], "job1")
+        p.cmd_START(Command())
+        self.assertEqual(p.journal.load()["phase"], "recovery_off")
+        self.assertIsNone(p.job)
+        self.assertIn("recovery off for this print", p.error)
+
+    def start_sd(self):
+        self.printer.sd.from_sd = True
+        self.phoenix.cmd_START(Command())
+        return self.phoenix
+
+    def test_unused_manual_stepper_allows_recording(self):
+        self.printer.settings["manual_stepper aux_stepper"] = {}
+        self.printer.objects["manual_stepper aux_stepper"] = SimpleNamespace(axis_gcode_id=None)
+        self.assertTrue(self.start_sd().active)
+
+    def test_skew_section_and_saved_profile_without_correction_are_allowed(self):
+        self.printer.settings["skew_correction"] = {}
+        self.printer.settings["skew_correction saved"] = {"xy_skew": .01}
+        self.printer.objects["skew_correction"] = SimpleNamespace(
+            xy_factor=0., xz_factor=0., yz_factor=0., current_profile_name="saved")
+        self.assertTrue(self.start_sd().active)
+
+    def test_each_active_skew_factor_disables_recovery_not_print(self):
+        for axis in ("xy", "xz", "yz"):
+            with self.subTest(axis=axis):
+                self.printer.sd.current_file = object()
+                self.printer.objects["skew_correction"] = SimpleNamespace(**{axis+"_factor": .001})
+                p = self.start_sd()
+                self.assertFalse(p.active)
+                self.assertIn("Active skew", p.error)
+                self.assertEqual(self.printer.gcode.commands, [])
+
+    def test_registered_manual_axis_disables_recovery(self):
+        self.printer.objects["manual_stepper aux"] = SimpleNamespace(axis_gcode_id=0)
+        p = self.start_sd()
+        self.assertFalse(p.active)
+        self.assertIn("GCODE_AXIS", p.error)
+
+    def install_manual_guard(self):
+        calls = []
+        handlers = {"aux": lambda command: calls.append(command)}
+        self.printer.gcode.mux_commands = {"MANUAL_STEPPER": ("STEPPER", handlers)}
+        self.phoenix._install_runtime_guards()
+        return handlers["aux"], calls
+
+    def test_manual_move_mid_print_continues_and_closes_both_journals(self):
+        command, calls = self.install_manual_guard()
+        p = self.start_sd()
+        cmd = Command(MOVE=10)
+        command(cmd)
+        self.assertEqual(calls, [cmd])
+        self.assertFalse(p.active)
+        self.assertEqual(p.journal.load()["phase"], "recovery_off")
+        for path in p.journal.directory.glob("journal-*.json"):
+            self.assertEqual(json.loads(path.read_text())["body"]["payload"]["phase"], "recovery_off")
+        revision = p.revision
+        p.cmd_START(Command())
+        self.assertEqual(revision, p.revision)
+        self.printer.sd.current_file = object()
+        p.cmd_START(Command())
+        self.assertTrue(p.active)
+
+    def test_manual_move_before_start_hook_disables_only_this_file(self):
+        command, calls = self.install_manual_guard()
+        self.printer.sd.from_sd = True
+        command(Command(SET_POSITION=0))
+        p = self.start_sd()
+        self.assertFalse(p.active)
+        self.assertEqual(len(calls), 1)
+
+    def test_idle_auxiliary_move_does_not_disable_next_print(self):
+        command, _ = self.install_manual_guard()
+        command(Command(MOVE=10))
+        self.assertTrue(self.start_sd().active)
+
+    def test_manual_enable_alone_does_not_disable_recording(self):
+        command, calls = self.install_manual_guard()
+        p = self.start_sd()
+        command(Command(ENABLE=1))
+        self.assertTrue(p.active)
+        self.assertEqual(len(calls), 1)
+
+    def test_skew_command_is_preserved_and_detected_between_samples(self):
+        skew = SimpleNamespace(xy_factor=0., xz_factor=0., yz_factor=0.)
+        self.printer.objects["skew_correction"] = skew
+        calls = []
+        def original(cmd):
+            calls.append(cmd)
+            skew.xy_factor = .01
+        self.printer.gcode.ready_gcode_handlers = {"SET_SKEW": original}
+        self.phoenix._install_runtime_guards()
+        p = self.start_sd()
+        cmd = Command(XY="1,2,3")
+        self.printer.gcode.ready_gcode_handlers["SET_SKEW"](cmd)
+        self.assertEqual(calls, [cmd])
+        self.assertFalse(p.active)
+        self.assertIn("Active skew", p.error)
+
+    def test_manual_axis_registration_command_disables_without_interrupting(self):
+        command, calls = self.install_manual_guard()
+        p = self.start_sd()
+        command(Command(GCODE_AXIS="A"))
+        self.assertFalse(p.active)
+        self.assertEqual(len(calls), 1)
+        p.cmd_END(Command())
+        self.assertEqual(p.phase, "idle")
+
+    def test_skew_clear_does_not_disable_recording(self):
+        skew = SimpleNamespace(xy_factor=0., xz_factor=0., yz_factor=0.)
+        self.printer.objects["skew_correction"] = skew
+        self.printer.gcode.ready_gcode_handlers = {"SET_SKEW": lambda cmd: None}
+        self.phoenix._install_runtime_guards()
+        p = self.start_sd()
+        self.printer.gcode.ready_gcode_handlers["SET_SKEW"](Command(CLEAR=1))
+        self.assertTrue(p.active)
+
+    def test_restart_after_recovery_disabled_does_not_offer_old_print(self):
+        p = self.interrupted()
+        self.printer.settings["printer"]["kinematics"] = "delta"
+        self.start_sd()
+        boot = Phoenix(self.config)
+        boot._ready()
+        self.addCleanup(boot.writer.flush)
+        self.assertEqual(boot.phase, "idle")
+        self.assertFalse(boot.get_status(100.)["recovery_available"])
+
+    def test_sampler_detects_runtime_axis_registration(self):
+        p = self.start_sd()
+        self.printer.objects["manual_stepper aux"] = SimpleNamespace(axis_gcode_id=4)
+        with self.assertLogs(level="ERROR"):
+            p._sample(100.)
+        self.assertFalse(p.active)
+        self.assertIn("GCODE_AXIS", p.error)
 
     def test_unhomed_setup_shows_home_before_any_save_or_jog(self):
         self.setup_hooks()

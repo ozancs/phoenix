@@ -61,8 +61,9 @@ class StartupIOTests(unittest.TestCase):
     def test_failed_write_never_activates_recording(self):
         self.printer.sd.from_sd = True
         with patch.object(core.os, "fsync", side_effect=OSError("disk unavailable")):
-            with self.assertRaisesRegex(ValueError, "disk unavailable"):
+            with self.assertLogs(level="ERROR"):
                 self.phoenix.cmd_START(Command())
+        self.assertIn("disk unavailable", self.phoenix.error)
         self.assertFalse(self.phoenix.active)
         self.assertFalse(self.phoenix.busy)
         self.assertEqual(self.phoenix.phase, "blocked")
@@ -85,8 +86,8 @@ class StartupIOTests(unittest.TestCase):
 
         self.printer.reactor.on_wait = tick
         with patch.object(core, "file_identity", slow_hash):
-            with self.assertRaisesRegex(ValueError, message):
-                self.phoenix.cmd_START(Command())
+            self.phoenix.cmd_START(Command())
+        self.assertIn(message, self.phoenix.error)
         self.assertFalse(self.phoenix.active)
         self.assertFalse(self.phoenix.busy)
 

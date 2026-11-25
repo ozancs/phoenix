@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.13 - 2026-11-25
+
+- An unused auxiliary manual stepper no longer prevents printing or recovery recording.
+- A configured skew section is allowed while its correction factors are zero.
+- Using a manual stepper during the print, registering a GCODE_AXIS, or activating skew correction disables recovery for that print with a clear message.
+- Phoenix startup and recording failures no longer cancel the print. Previous recovery records are retired when a new print cannot be recorded.
+
 ## 0.4.12 - 2026-11-16
 
 - Store the bed mesh once per print instead of in every recovery point. Large scan meshes no longer grow the recovery file to several MB every two seconds.

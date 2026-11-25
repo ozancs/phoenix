@@ -13,7 +13,9 @@ Setup checks the configuration and helps you save a park point. It cannot certif
 
 ## Current limits
 
-Multi-extruder and multi-material setups, dual carriages, extra motion axes, runtime mesh offsets, skew correction, thermal Z adjustment and bed tilt transforms are unsupported. Objects excluded during the print are excluded again after recovery. Custom macro and accessory state is not automatically reconstructed. Recording skips firmware-retracted states.
+Unused auxiliary manual steppers and inactive skew correction are allowed. Using a manual stepper during a print or linking it through `GCODE_AXIS` disables recovery for that print. Phoenix reports **recovery off for this print** when recording is unsupported or fails; it does not cancel the print.
+
+Multi-extruder and multi-material setups, dual carriages, extra motion axes, runtime mesh offsets, active skew correction, thermal Z adjustment and bed tilt transforms are unsupported. Objects excluded during the print are excluded again after recovery. Custom macro and accessory state is not automatically reconstructed. Recording skips firmware-retracted states.
 
 Z-hop is allowed, but an outage during a hop can leave physical Z different from the saved value. Likewise, queued movement may not have finished when power failed. Phoenix uses saved commanded positions, not a sensor measurement of the stopping point. Selecting an earlier record can repeat plastic; selecting a later one can skip it. Exact mid-line recovery is not available.
 
